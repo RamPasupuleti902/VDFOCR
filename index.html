@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>eSIM Data Extractor</title>
+    <!-- FREE LIBRARIES (require internet on first load) -->
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #f0f2f5; padding: 20px; }
+        .container { max-width: 960px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        h2 { text-align: center; color: #1a73e8; }
+        .upload-section { border: 2px dashed #1a73e8; padding: 20px; text-align: center; border-radius: 8px; background: #f8fbff; margin-bottom: 20px; }
+        #preview { max-width: 100%; max-height: 200px; margin-top: 10px; display: none; margin-left: auto; margin-right: auto; }
+        .controls { display: flex; gap: 10px; margin-bottom: 20px; }
+        .controls button { flex: 1; padding: 12px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; color: white; }
+        .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #processBtn { background: #1a73e8; }
+        #downloadBtn { background: #34a853; }
+        #loader { display: none; text-align: center; color: #1a73e8; font-weight: bold; margin-bottom: 8px; }
+        #status { text-align: center; font-size: 13px; margin-bottom: 15px; min-height: 18px; }
+        #status.error { color: #c5221f; font-weight: bold; white-space: pre-wrap; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; font-size: 14px; vertical-align: middle; }
+        th { background: #f1f3f4; }
+        .lpa-text { font-family: monospace; font-size: 11px; color: #555; word-break: break-all; }
+        .edit { display: inline-block; min-width: 40px; padding: 2px 5px; border-radius: 3px; outline: none; cursor: text; }
+        .edit:hover { background: #f5f5f5; }
+        .edit:focus { background: #fffbe6; box-shadow: 0 0 0 2px #1a73e8 inset; }
+        .bad { color: #c5221f; }
+        .warn-badge { font-size: 12px; color: #c5221f; margin-left: 4px; cursor: help; }
+        .ok-badge { font-size: 12px; color: #34a853; margin-left: 4px; cursor: help; }
+        .del-btn { background: #c5221f; color: #fff; border: none; border-radius: 4px; padding: 5px 9px; cursor: pointer; font-size: 13px; line-height: 1; }
+        .del-btn:hover { background: #a01a17; }
+        .hint { font-size: 12px; color: #777; margin-top: 10px; }
+        details { margin-top: 20px; }
+        summary { cursor: pointer; font-weight: bold; color: #555; }
+        #debugBox { background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 12px;
+                    padding: 12px; border-radius: 6px; white-space: pre-wrap; word-break: break-word;
+                    max-height: 260px; overflow: auto; margin-top: 10px; }
+        .prep-preview { margin-top: 10px; max-width: 100%; border: 1px solid #ccc; border-radius: 4px; display: none; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>eSIM Master Recorder (OCR)</h2>
+
+    <div class="upload-section">
+        <input type="file" id="fileInput" accept="image/*">
+        <br>
+        <img id="preview">
+    </div>
+
+    <div id="loader">Reading Image...</div>
+    <div id="status"></div>
+
+    <div class="controls">
+        <button id="processBtn" disabled>Process Image</button>
+        <button id="downloadBtn">Download CSV</button>
+    </div>
+
+    <table id="historyTable">
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>ICCID</th>
+                <th>PIN</th>
+                <th>PUK</th>
+                <th>LPA Code</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+    <div class="hint">Tip: click any ICCID / PIN / PUK / LPA value to edit it. PIN &amp; PUK have no checksum, so verify them against the card. Edits are saved automatically and included in the CSV.</div>
+
+    <details open>
+        <summary>Debug: last raw OCR text, QR result &amp; processed image</summary>
+        <div id="debugBox">Process an image to see what the OCR/QR actually read.</div>
+        <img id="prepPreview" class="prep-preview" alt="preprocessed image fed to OCR">
+    </details>
+</div>
+
+<script>
+const fileInput   = document.getElementById('fileInput');
+const preview     = document.getElementById('preview');
+const processBtn  = document.getElementById('processBtn');
+const loader      = document.getElementById('loader');
+const statusEl    = document.getElementById('status');
+const debugBox    = document.getElementById('debugBox');
+const prepPreview = document.getElementById('prepPreview');
+const historyBody = document.querySelector('#historyTable tbody');
+
+let currentImage = null;
+let historyData  = [];
+let nextId       = 1;
+
+function setStatus(msg, isError = false) {
+    statusEl.textContent = msg || '';
+    statusEl.className = isError ? 'error' : '';
+    if (isError) console.error(msg);
+}
+
+window.addEventListener('load', () => {
+    const missing = [];
+    if (typeof Tesseract === 'undefined') missing.push('Tesseract.js');
+    if (typeof jsQR === 'undefined')      missing.push('jsQR');
+    if (missing.length) {
+        setStatus('Library failed to load: ' + missing.join(', ') +
+                  '. Check your internet connection / ad-blocker.', true);
+    }
+});
+
+// 1. Handle File Upload
+fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        currentImage = event.target.result;
+        preview.src = currentImage;
+        preview.style.display = 'block';
+        processBtn.disabled = false;
+        setStatus('');
+    };
+    reader.onerror = () => setStatus('Could not read the selected file.', true);
+    reader.readAsDataURL(file);
+});
+
+// 2. Main Processing Function
+processBtn.addEventListener('click', async () => {
+    if (!currentImage) return;
+    if (typeof Tesseract === 'undefined' || typeof jsQR === 'undefined') {
+        setStatus('OCR/QR library not loaded — see message above.', true);
+        return;
+    }
+
+    loader.style.display = 'block';
+    processBtn.disabled = true;
+    setStatus('Loading image...');
+
+    try {
+        const img = await loadImage(currentImage);
+
+        setStatus('Preprocessing...');
+        const prepCanvas = preprocessForOCR(img);
+        prepPreview.src = prepCanvas.toDataURL('image/png');
+        prepPreview.style.display = 'block';
+
+        // --- STEP A: READ QR CODE (LPA) ---
+        setStatus('Scanning QR...');
+        const qr = detectQR(img, prepCanvas);
+
+        // --- STEP B: OCR (ICCID, PIN, PUK) ---
+        setStatus('Running OCR...');
+        const { data: { text } } = await Tesseract.recognize(prepCanvas, 'eng', {
+            logger: m => {
+                if (m.status === 'recognizing text') setStatus('OCR: ' + Math.round(m.progress * 100) + '%');
+                else setStatus(m.status + (m.progress ? ' ' + Math.round(m.progress * 100) + '%' : ''));
+            }
+        });
+
+        debugBox.textContent =
+            'QR RESULT (' + (qr.via || 'none') + '):\n' + (qr.value || '(none found)') +
+            '\n\n----- RAW OCR TEXT (preprocessed) -----\n' + (text || '(empty)');
+
+        const iccid = extractIccid(text);
+        historyData.unshift({
+            id: nextId++,
+            time: new Date().toLocaleTimeString(),
+            iccid,
+            iccidLuhn: iccid !== "Not Found" ? luhnValid(iccid) : null,
+            pin: extractNear(text, 'PIN', 4),
+            puk: extractNear(text, 'PUK', 8),
+            lpa: qr.value || "QR Not Found"
+        });
+        renderTable();
+
+        preview.style.display = 'none';
+        fileInput.value = "";
+        currentImage = null;
+        processBtn.disabled = true;
+        setStatus('Record added.');
+
+    } catch (err) {
+        setStatus('Processing failed: ' + (err && err.message ? err.message : String(err)), true);
+        processBtn.disabled = false;
+    } finally {
+        loader.style.display = 'none';
+    }
+});
+
+// ---------- Image helpers ----------
+
+function loadImage(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('Image failed to load.'));
+        img.src = src;
+    });
+}
+
+function makeCanvas(img, targetMax) {
+    const maxSide = Math.max(img.width, img.height);
+    const scale = maxSide < targetMax ? targetMax / maxSide : 1;
+    const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    return c;
+}
+
+function decodeJsQR(canvas, threshold) {
+    const w = canvas.width, h = canvas.height;
+    const id = canvas.getContext('2d').getImageData(0, 0, w, h);
+    let data = id.data;
+    if (threshold) {
+        const gray = new Uint8ClampedArray(w * h);
+        for (let i = 0, p = 0; i < data.length; i += 4, p++) gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+        const t = otsu(gray);
+        const out = new Uint8ClampedArray(data.length);
+        for (let i = 0, p = 0; i < data.length; i += 4, p++) { const v = gray[p] > t ? 255 : 0; out[i] = out[i + 1] = out[i + 2] = v; out[i + 3] = 255; }
+        data = out;
+    }
+    const code = jsQR(data, w, h, { inversionAttempts: 'attemptBoth' });
+    return code ? code.data : null;
+}
+
+function detectQR(img, prepCanvas) {
+    let v = decodeJsQR(prepCanvas, false);
+    if (v) return { value: v, via: 'jsQR/prep' };
+
+    const rawCanvas = makeCanvas(img, 1600);
+    v = decodeJsQR(rawCanvas, false);
+    if (v) return { value: v, via: 'jsQR/raw' };
+
+    v = decodeJsQR(rawCanvas, true);
+    if (v) return { value: v, via: 'jsQR/threshold' };
+
+    return { value: null, via: null };
+}
+
+function preprocessForOCR(img) {
+    const c = makeCanvas(img, 1800);
+    const ctx = c.getContext('2d');
+    const w = c.width, h = c.height;
+    const id = ctx.getImageData(0, 0, w, h);
+    const d = id.data;
+    const gray = new Uint8ClampedArray(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) gray[p] = d[i + 2]; // blue channel
+    const t = otsu(gray);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) { const v = gray[p] > t ? 255 : 0; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
+    ctx.putImageData(id, 0, 0);
+    return c;
+}
+
+function otsu(gray) {
+    const hist = new Array(256).fill(0);
+    for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
+    const total = gray.length;
+    let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
+    let sumB = 0, wB = 0, varMax = 0, threshold = 127;
+    for (let t = 0; t < 256; t++) {
+        wB += hist[t]; if (wB === 0) continue;
+        const wF = total - wB; if (wF === 0) break;
+        sumB += t * hist[t];
+        const mB = sumB / wB, mF = (sum - sumB) / wF;
+        const between = wB * wF * (mB - mF) * (mB - mF);
+        if (between > varMax) { varMax = between; threshold = t; }
+    }
+    return threshold;
+}
+
+// ---------- Extraction helpers ----------
+
+function extractIccid(text) {
+    const m = text.match(/89[\d][\d\s\-]{14,24}/);
+    if (m) {
+        const digits = m[0].replace(/\D/g, '');
+        if (digits.length >= 18 && digits.length <= 20) return digits.slice(0, 20);
+    }
+    const collapsed = text.replace(/[\s\-]/g, '');
+    const m2 = collapsed.match(/89\d{16,18}/);
+    return m2 ? m2[0] : "Not Found";
+}
+
+function extractNear(text, label, count) {
+    const re = new RegExp(label + '\\s*[:.\\-]?\\s*((?:\\d\\s*){' + count + '})', 'i');
+    const m = text.match(re);
+    if (!m) return "Not Found";
+    const digits = m[1].replace(/\D/g, '');
+    return digits.length === count ? digits : "Not Found";
+}
+
+function luhnValid(num) {
+    if (!/^\d+$/.test(num)) return false;
+    let sum = 0, alt = false;
+    for (let i = num.length - 1; i >= 0; i--) {
+        let n = parseInt(num[i], 10);
+        if (alt) { n *= 2; if (n > 9) n -= 9; }
+        sum += n; alt = !alt;
+    }
+    return sum % 10 === 0;
+}
+
+// ---------- Render / edit / delete ----------
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function luhnBadge(l) {
+    if (l === true)  return '<span class="ok-badge" title="Luhn checksum OK">&#10003;</span>';
+    if (l === false) return '<span class="warn-badge" title="Luhn checksum failed — likely a misread, verify manually">&#9888;</span>';
+    return '';
+}
+
+function renderTable() {
+    historyBody.innerHTML = historyData.map(item => `
+        <tr data-id="${item.id}">
+            <td>${item.time}</td>
+            <td><span class="edit${item.iccidLuhn === false ? ' bad' : ''}" contenteditable="true" data-field="iccid">${escapeHtml(item.iccid)}</span><span class="badge">${luhnBadge(item.iccidLuhn)}</span></td>
+            <td><span class="edit" contenteditable="true" data-field="pin">${escapeHtml(item.pin)}</span></td>
+            <td><span class="edit" contenteditable="true" data-field="puk">${escapeHtml(item.puk)}</span></td>
+            <td class="lpa-text"><span class="edit" contenteditable="true" data-field="lpa">${escapeHtml(item.lpa)}</span></td>
+            <td><button class="del-btn" data-id="${item.id}" title="Delete row">&#128465;</button></td>
+        </tr>
+    `).join('');
+}
+
+// Commit inline edits on focus loss
+historyBody.addEventListener('focusout', (e) => {
+    const span = e.target.closest('.edit');
+    if (!span) return;
+    const tr = span.closest('tr');
+    const entry = historyData.find(x => x.id === +tr.dataset.id);
+    if (!entry) return;
+    const field = span.dataset.field;
+    entry[field] = span.textContent.trim();
+    if (field === 'iccid') {
+        entry.iccidLuhn = /^\d+$/.test(entry.iccid) ? luhnValid(entry.iccid) : null;
+        span.classList.toggle('bad', entry.iccidLuhn === false);
+        const badge = tr.querySelector('.badge');
+        if (badge) badge.innerHTML = luhnBadge(entry.iccidLuhn);
+    }
+});
+
+// Enter key confirms an edit instead of adding a newline
+historyBody.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.closest('.edit')) {
+        e.preventDefault();
+        e.target.blur();
+    }
+});
+
+// Delete a row
+historyBody.addEventListener('click', (e) => {
+    const btn = e.target.closest('.del-btn');
+    if (!btn) return;
+    historyData = historyData.filter(x => x.id !== +btn.dataset.id);
+    renderTable();
+});
+
+// ---------- Export ----------
+
+document.getElementById('downloadBtn').addEventListener('click', () => {
+    if (!historyData.length) { setStatus('Nothing to export yet.', true); return; }
+    let csv = "Time,ICCID,ICCID_Valid,PIN,PUK,LPA Code\n";
+    historyData.forEach(row => {
+        const valid = row.iccidLuhn === true ? 'OK' : (row.iccidLuhn === false ? 'CHECK' : '');
+        const fields = [row.time, "'" + row.iccid, valid, row.pin, row.puk, row.lpa];
+        csv += fields.map(f => `"${String(f).replace(/"/g, '""')}"`).join(",") + "\n";
+    });
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Batch_Export.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+});
+</script>
+
+</body>
+</html>

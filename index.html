@@ -337,6 +337,18 @@ async function scanImage(img) {
         }
     }
 
+    // Positional fallback: some cards (e.g. many Vodafone IT cards) print PIN/PUK as
+    // two bare numbers with no "PIN"/"PUK" label anywhere nearby — extractField's
+    // label search can never match those, on any pass, no matter how clean the OCR is.
+    // If a field is still missing at this point, look for it by position instead: a
+    // clean standalone 4-digit line is the PIN, a clean standalone 8-digit line is the
+    // PUK, in the order they appear (PIN is printed above PUK on the cards we've seen).
+    if (pin === 'Not Found' || puk === 'Not Found') {
+        const positional = extractPositionalPinPuk(rawText, iccid);
+        if (pin === 'Not Found' && positional.pin) pin = positional.pin;
+        if (puk === 'Not Found' && positional.puk) puk = positional.puk;
+    }
+
     return {
         id: nextId++,
         time: new Date().toLocaleTimeString(),
@@ -751,18 +763,44 @@ function extractField(text, label, count) {
     digits = search(secondaryRe);
     if (digits) return digits;
 
-    // Last resort: the "PIN"/"PUK" text itself didn't OCR cleanly at all (blur, glare,
-    // bad angle), so there's no label to anchor on. Scan for an isolated digit run of
-    // the right length anywhere in the text, skipping the LPA/activation-code line —
-    // that string is long, alphanumeric, and full of stray digit groups (e.g. "1204")
-    // that would otherwise get mistaken for a PIN. The ICCID is naturally safe here
-    // since it's one unbroken 19-20 digit run, not an isolated 4- or 8-digit one.
-    for (const line of lines) {
-        if (isActivationCodeLine(line)) continue;
-        digits = pullDigits(line);
-        if (digits) return digits;
-    }
+    // No label match on this pass — the caller (scanImage) falls back to
+    // extractPositionalPinPuk() once both passes have been tried, which handles
+    // label-less cards more reliably than a per-field blind scan would (see its
+    // comment below for why).
     return 'Not Found';
+}
+
+// Fallback for cards that print PIN/PUK as two bare numbers with no "PIN"/"PUK" text
+// anywhere on the label (common on some Vodafone IT cards) — extractField's label
+// search can never match these on any OCR pass, since there's no label to find.
+//
+// Deliberately much stricter than a blind digit-run scan: a candidate line is only
+// trusted if, once spaces/dashes are stripped, it is ENTIRELY digits and exactly 4 or
+// 8 characters long — no leftover letters or symbols. Whole-image OCR text is full of
+// stray digits (menu bars, notification badges, timestamps) that could otherwise be
+// mistaken for a PIN; a clean standalone line is a much stronger signal than a run
+// embedded in noisier text. Both fields are resolved together (rather than searching
+// twice, once per field) so the same line can't accidentally get assigned to both.
+function extractPositionalPinPuk(text, iccid) {
+    const lines = text.split(/\r?\n/);
+    let pin = null, puk = null;
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || isActivationCodeLine(line)) continue;
+
+        const compact = line.replace(/[\s\-]/g, '');
+        if (!/^\d+$/.test(compact)) continue;          // must be a clean, pure-digit line
+        if (iccid !== 'Not Found' && compact === iccid) continue; // skip the ICCID line itself
+        if (compact.length >= 18) continue;             // ICCID-length run, not PIN/PUK
+
+        if (compact.length === 4 && !pin) pin = compact;
+        else if (compact.length === 8 && !puk) puk = compact;
+
+        if (pin && puk) break;
+    }
+
+    return { pin, puk };
 }
 
 function isActivationCodeLine(line) {

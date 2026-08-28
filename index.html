@@ -302,13 +302,24 @@ async function scanImage(img) {
     let puk = extractField(text, 'PUK', 8);
     let rawText = text;
 
+    // Picks whichever ICCID candidate is more trustworthy: a checksum-valid one wins
+    // outright, otherwise keep any existing value over a blank "Not Found".
+    function considerIccid(candidate) {
+        if (candidate === 'Not Found') return;
+        const candidateLuhn = luhnValid(candidate);
+        if (candidateLuhn === true || iccid === 'Not Found') {
+            iccid = candidate;
+            iccidLuhn = candidateLuhn;
+        }
+    }
+
     // A hard black/white threshold is great for crisp printed text, but it can wipe
     // out faint or dot-matrix-printed digits entirely, or misread a digit rather than
     // missing it outright (a wrong-but-plausible-length ICCID that fails its checksum
     // is the same underlying failure as PIN/PUK coming back "Not Found" — the pass
     // just guessed wrong instead of giving up). Retry on a softer, contrast-stretched
     // (not binarized) version whenever any field looks unreliable, not just PIN/PUK.
-    const needsRetry = pin === 'Not Found' || puk === 'Not Found' || iccid === 'Not Found' || iccidLuhn === false;
+    let needsRetry = pin === 'Not Found' || puk === 'Not Found' || iccid === 'Not Found' || iccidLuhn === false;
     if (needsRetry) {
         setStatus('Retrying fields with alternate processing...');
         const altCanvas = preprocessForOCRAlt(img);
@@ -320,21 +331,7 @@ async function scanImage(img) {
         rawText = text + '\n----- alternate pass -----\n' + text2;
         if (pin === 'Not Found') pin = extractField(text2, 'PIN', 4);
         if (puk === 'Not Found') puk = extractField(text2, 'PUK', 8);
-
-        if (iccid === 'Not Found' || iccidLuhn === false) {
-            const altIccid = extractIccid(text2);
-            const altLuhn = altIccid !== 'Not Found' ? luhnValid(altIccid) : null;
-            if (altLuhn === true) {
-                // Alternate pass found a candidate that actually checksums — trust it
-                // over a first-pass value that didn't, even if the first pass "found" one.
-                iccid = altIccid; iccidLuhn = true;
-            } else if (iccid === 'Not Found' && altIccid !== 'Not Found') {
-                iccid = altIccid; iccidLuhn = altLuhn;
-            }
-            // Otherwise keep the first-pass value — still flagged red for manual
-            // review in the table, which is the correct outcome when neither pass
-            // produced a checksum-valid ICCID.
-        }
+        if (iccid === 'Not Found' || iccidLuhn === false) considerIccid(extractIccid(text2));
     }
 
     // Positional fallback: some cards (e.g. many Vodafone IT cards) print PIN/PUK as
@@ -347,6 +344,32 @@ async function scanImage(img) {
         const positional = extractPositionalPinPuk(rawText, iccid);
         if (pin === 'Not Found' && positional.pin) pin = positional.pin;
         if (puk === 'Not Found' && positional.puk) puk = positional.puk;
+    }
+
+    // Third pass, local-adaptive threshold: for photos where a small high-contrast
+    // label (e.g. a white PIN/PUK box) sits inside a much larger, differently-colored
+    // frame (a colored card body, plus screen/browser clutter on a screenshot), a
+    // single global threshold — what both passes above use — can wash the label out
+    // entirely even though it would binarize cleanly on its own. Only worth the extra
+    // OCR pass when something is still missing after the first two attempts.
+    if (pin === 'Not Found' || puk === 'Not Found' || iccid === 'Not Found' || iccidLuhn === false) {
+        setStatus('Retrying with local adaptive contrast...');
+        const localCanvas = preprocessForOCRLocal(img);
+        const { data: { text: text3 } } = await Tesseract.recognize(localCanvas, 'eng', {
+            logger: m => {
+                if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
+            }
+        });
+        rawText += '\n----- local-adaptive pass -----\n' + text3;
+        if (pin === 'Not Found') pin = extractField(text3, 'PIN', 4);
+        if (puk === 'Not Found') puk = extractField(text3, 'PUK', 8);
+        if (iccid === 'Not Found' || iccidLuhn === false) considerIccid(extractIccid(text3));
+
+        if (pin === 'Not Found' || puk === 'Not Found') {
+            const positional2 = extractPositionalPinPuk(rawText, iccid);
+            if (pin === 'Not Found' && positional2.pin) pin = positional2.pin;
+            if (puk === 'Not Found' && positional2.puk) puk = positional2.puk;
+        }
     }
 
     return {
@@ -664,6 +687,46 @@ function preprocessForOCRAlt(img) {
         const v = Math.round((gray[p] - min) * 255 / range);
         d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
     }
+    ctx.putImageData(id, 0, 0);
+    return c;
+}
+
+// Third-pass fallback: preprocessForOCR/Alt both pick ONE threshold for the entire
+// photo. That's fine when the card fills the frame, but a lot of real photos have a
+// small high-contrast label (e.g. a white PIN/PUK box) sitting inside a much larger,
+// differently-colored background (e.g. a dark red card, plus browser chrome/notification
+// clutter above it on a screenshot). A single global threshold gets pulled toward
+// whatever color dominates the frame, and can under- or over-expose the small patch
+// that actually matters even though that patch alone would binarize cleanly.
+// This computes Otsu's threshold separately per tile instead of once for the whole
+// image, so a bright box on a dark background gets thresholded on its own local
+// contrast regardless of what the rest of the frame looks like.
+function preprocessForOCRLocal(img, tileSize = 48) {
+    const c = fitCanvas(img, TARGET_LONG_SIDE);
+    const ctx = c.getContext('2d');
+    const w = c.width, h = c.height;
+    const id = ctx.getImageData(0, 0, w, h);
+    const d = id.data;
+    let gray = new Uint8ClampedArray(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) gray[p] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+
+    const srcLong = Math.max(img.width, img.height);
+    if (srcLong < TARGET_LONG_SIDE) gray = sharpenGray(gray, w, h);
+
+    const out = new Uint8ClampedArray(w * h);
+    for (let ty = 0; ty < h; ty += tileSize) {
+        for (let tx = 0; tx < w; tx += tileSize) {
+            const tw = Math.min(tileSize, w - tx), th = Math.min(tileSize, h - ty);
+            const tile = new Uint8ClampedArray(tw * th);
+            for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) tile[y * tw + x] = gray[(ty + y) * w + (tx + x)];
+            const t = otsu(tile);
+            for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
+                const gi = (ty + y) * w + (tx + x);
+                out[gi] = gray[gi] > t ? 255 : 0;
+            }
+        }
+    }
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) { const v = out[p]; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
     ctx.putImageData(id, 0, 0);
     return c;
 }

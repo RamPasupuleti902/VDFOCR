@@ -296,18 +296,21 @@ async function scanImage(img) {
         }
     });
 
-    const iccid = extractIccid(text);
+    let iccid = extractIccid(text);
+    let iccidLuhn = iccid !== 'Not Found' ? luhnValid(iccid) : null;
     let pin = extractField(text, 'PIN', 4);
     let puk = extractField(text, 'PUK', 8);
     let rawText = text;
 
     // A hard black/white threshold is great for crisp printed text, but it can wipe
-    // out faint or dot-matrix-printed PIN/PUK digits entirely rather than misreading
-    // them — that's the "neither field found" case. If either is still missing, retry
-    // just that pass on a softer, contrast-stretched (not binarized) version instead
-    // of giving up after one attempt.
-    if (pin === 'Not Found' || puk === 'Not Found') {
-        setStatus('Retrying PIN/PUK with alternate processing...');
+    // out faint or dot-matrix-printed digits entirely, or misread a digit rather than
+    // missing it outright (a wrong-but-plausible-length ICCID that fails its checksum
+    // is the same underlying failure as PIN/PUK coming back "Not Found" — the pass
+    // just guessed wrong instead of giving up). Retry on a softer, contrast-stretched
+    // (not binarized) version whenever any field looks unreliable, not just PIN/PUK.
+    const needsRetry = pin === 'Not Found' || puk === 'Not Found' || iccid === 'Not Found' || iccidLuhn === false;
+    if (needsRetry) {
+        setStatus('Retrying fields with alternate processing...');
         const altCanvas = preprocessForOCRAlt(img);
         const { data: { text: text2 } } = await Tesseract.recognize(altCanvas, 'eng', {
             logger: m => {
@@ -317,13 +320,28 @@ async function scanImage(img) {
         rawText = text + '\n----- alternate pass -----\n' + text2;
         if (pin === 'Not Found') pin = extractField(text2, 'PIN', 4);
         if (puk === 'Not Found') puk = extractField(text2, 'PUK', 8);
+
+        if (iccid === 'Not Found' || iccidLuhn === false) {
+            const altIccid = extractIccid(text2);
+            const altLuhn = altIccid !== 'Not Found' ? luhnValid(altIccid) : null;
+            if (altLuhn === true) {
+                // Alternate pass found a candidate that actually checksums — trust it
+                // over a first-pass value that didn't, even if the first pass "found" one.
+                iccid = altIccid; iccidLuhn = true;
+            } else if (iccid === 'Not Found' && altIccid !== 'Not Found') {
+                iccid = altIccid; iccidLuhn = altLuhn;
+            }
+            // Otherwise keep the first-pass value — still flagged red for manual
+            // review in the table, which is the correct outcome when neither pass
+            // produced a checksum-valid ICCID.
+        }
     }
 
     return {
         id: nextId++,
         time: new Date().toLocaleTimeString(),
         iccid,
-        iccidLuhn: iccid !== 'Not Found' ? luhnValid(iccid) : null,
+        iccidLuhn,
         pin,
         puk,
         lpa: qr.value || 'QR Not Found',
@@ -380,7 +398,8 @@ async function runBatch(files) {
     processBtn.disabled = true;
     scanQueueBtn.disabled = true;
 
-    let ok = 0, failed = 0, flagged = 0;
+    let ok = 0, flagged = 0;
+    const failedNames = [];
     for (let i = 0; i < files.length; i++) {
         setStatus(`Processing photo ${i + 1} of ${files.length}...`);
         try {
@@ -389,11 +408,11 @@ async function runBatch(files) {
             const entry = await scanImage(img);
             historyData.unshift(entry);
             renderTable();
-            if (entry.blurry || entry.pin === 'Not Found' || entry.puk === 'Not Found') flagged++;
+            if (entry.blurry || entry.pin === 'Not Found' || entry.puk === 'Not Found' || entry.iccidLuhn === false) flagged++;
             ok++;
             if (aiToggle.checked) verifyRow(entry);   // fires off in the background, doesn't block the batch
         } catch (err) {
-            failed++;
+            failedNames.push(files[i].name || `photo ${i + 1}`);
             console.warn('Batch item failed (' + files[i].name + '):', err);
         }
     }
@@ -405,8 +424,10 @@ async function runBatch(files) {
     scanQueueBtn.disabled = false;
 
     let msg = `Batch done — added ${ok} of ${files.length} photo(s).`;
-    if (failed) msg += ` ${failed} failed to process.`;
-    if (flagged) msg += ` ${flagged} need a second look (blurry or a field missing) — check the tags in the table.`;
+    // Filenames instead of just a count, so a failure is actually actionable from the
+    // page itself rather than only visible in the browser console.
+    if (failedNames.length) msg += ` Failed: ${failedNames.join(', ')}.`;
+    if (flagged) msg += ` ${flagged} need a second look (blurry, a field missing, or a checksum mismatch) — check the tags in the table.`;
     setStatus(msg);
 }
 

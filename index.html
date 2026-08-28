@@ -194,8 +194,8 @@ processBtn.addEventListener('click', async () => {
             time: new Date().toLocaleTimeString(),
             iccid,
             iccidLuhn: iccid !== 'Not Found' ? luhnValid(iccid) : null,
-            pin: extractNear(text, 'PIN', 4),
-            puk: extractNear(text, 'PUK', 8),
+            pin: extractField(text, 'PIN', 4),
+            puk: extractField(text, 'PUK', 8),
             lpa: qr.value || 'QR Not Found',
             img: compressImage(img, 1600, 0.85),
             aiVerified: false,
@@ -442,12 +442,50 @@ function extractIccid(text) {
     return m2 ? m2[0] : 'Not Found';
 }
 
-function extractNear(text, label, count) {
-    const re = new RegExp(label + '\\s*[:.\\-]?\\s*((?:\\d\\s*){' + count + '})', 'i');
-    const m = text.match(re);
-    if (!m) return 'Not Found';
-    const digits = m[1].replace(/\D/g, '');
-    return digits.length === count ? digits : 'Not Found';
+// Cards print PIN/PUK as "PIN1"/"PUK1" (and sometimes a secondary "PIN2"/"PUK2"),
+// and the value isn't always on the same line as the label. The old version only
+// looked for the bare word "PIN"/"PUK" immediately followed by digits, so on any
+// card printed as "PIN1: 1234" the "1" broke the match — it would then either fail
+// or accidentally lock onto whichever PIN/PUK-like label happened to work in that
+// particular OCR pass, which is why one field or the other kept going missing.
+function extractField(text, label, count) {
+    const lines = text.split(/\r?\n/);
+
+    function pullDigits(str) {
+        const re = new RegExp('(?<!\\d)(?:\\d[ \\-]?){' + (count - 1) + '}\\d(?!\\d)');
+        const m = str.match(re);
+        if (!m) return null;
+        const digits = m[0].replace(/\D/g, '');
+        return digits.length === count ? digits : null;
+    }
+
+    function search(labelRe) {
+        for (let li = 0; li < lines.length; li++) {
+            const line = lines[li];
+            const found = line.match(labelRe);
+            if (!found) continue;
+            const idx = found.index;
+            let digits = pullDigits(line.slice(idx + found[0].length));
+            if (digits) return digits;
+            digits = pullDigits(line);
+            if (digits) return digits;
+            for (let off = 1; off <= 2 && li + off < lines.length; off++) {
+                digits = pullDigits(lines[li + off]);
+                if (digits) return digits;
+            }
+        }
+        return null;
+    }
+
+    // Primary code: "LABEL1" or bare "LABEL" (but not "LABEL2", which is the secondary code).
+    const primaryRe = new RegExp('\\b' + label + '\\s*1\\b|\\b' + label + '\\b(?!\\s*2)', 'i');
+    let digits = search(primaryRe);
+    if (digits) return digits;
+
+    // Fall back to the secondary code if that's all the card shows.
+    const secondaryRe = new RegExp('\\b' + label + '\\s*2\\b', 'i');
+    digits = search(secondaryRe);
+    return digits || 'Not Found';
 }
 
 function luhnValid(num) {

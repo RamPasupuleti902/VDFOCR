@@ -485,7 +485,24 @@ function extractField(text, label, count) {
     // Fall back to the secondary code if that's all the card shows.
     const secondaryRe = new RegExp('\\b' + label + '\\s*2\\b', 'i');
     digits = search(secondaryRe);
-    return digits || 'Not Found';
+    if (digits) return digits;
+
+    // Last resort: the "PIN"/"PUK" text itself didn't OCR cleanly at all (blur, glare,
+    // bad angle), so there's no label to anchor on. Scan for an isolated digit run of
+    // the right length anywhere in the text, skipping the LPA/activation-code line —
+    // that string is long, alphanumeric, and full of stray digit groups (e.g. "1204")
+    // that would otherwise get mistaken for a PIN. The ICCID is naturally safe here
+    // since it's one unbroken 19-20 digit run, not an isolated 4- or 8-digit one.
+    for (const line of lines) {
+        if (isActivationCodeLine(line)) continue;
+        digits = pullDigits(line);
+        if (digits) return digits;
+    }
+    return 'Not Found';
+}
+
+function isActivationCodeLine(line) {
+    return /LPA\s*[:.]?\s*1\$/i.test(line) || /SM-?DP/i.test(line) || /\$[A-Z0-9]{4,}/.test(line);
 }
 
 function luhnValid(num) {

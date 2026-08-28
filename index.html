@@ -59,6 +59,17 @@
         .del-btn:hover { background: #fecaca; }
         .empty { color: var(--muted); font-size: 14px; padding: 14px 0; }
         footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 20px; }
+        /* Queue bar: shown when photos have been added one-at-a-time (e.g. Android
+           browsers/WebViews that ignore the <input multiple> attribute) so the user
+           can keep adding before scanning the whole batch together. */
+        #queueBar { display: none; margin-top: 14px; background: #f0fdfa; border: 1px solid #99f6e4; border-radius: 10px; padding: 12px 14px; text-align: center; }
+        #queueCount { color: var(--teal-dark); font-size: 14px; font-weight: 600; margin: 0 0 10px; }
+        .queue-actions { display: flex; gap: 8px; }
+        #scanQueueBtn { flex: 1; }
+        #clearQueueBtn { background: #fff; color: var(--muted); border: 1px solid #cbd5e1; padding: 12px 14px; border-radius: 9px; font-weight: 600; font-size: 14px; cursor: pointer; }
+        #clearQueueBtn:hover { background: #f8fafc; }
+        .thumb-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-bottom: 10px; }
+        .thumb-row img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; border: 1px solid #cbd5e1; }
         @media (max-width: 560px) { .controls { flex-direction: column; } .container { padding: 18px; } }
     </style>
 </head>
@@ -72,10 +83,19 @@
             <button class="pick-btn" id="cameraBtn">Take a photo</button>
             <button class="pick-btn secondary" id="galleryBtn">Choose from gallery</button>
         </div>
-        <p class="hint">Fill the frame and keep the card flat and well lit. Camera requires HTTPS.<br>Choose from gallery supports selecting multiple photos at once for batch scanning.</p>
+        <p class="hint">Fill the frame and keep the card flat and well lit. Camera requires HTTPS.<br>Pick multiple photos at once where your browser supports it, or tap "Choose from gallery" repeatedly to add photos one at a time — either way they'll show up below to scan together.</p>
         <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
         <input type="file" id="galleryInput" accept="image/*" multiple hidden>
         <img id="preview" alt="selected card">
+
+        <div id="queueBar">
+            <div class="thumb-row" id="queueThumbs"></div>
+            <p id="queueCount"></p>
+            <div class="queue-actions">
+                <button class="scan-btn" id="scanQueueBtn">Scan queued photos</button>
+                <button id="clearQueueBtn">Clear</button>
+            </div>
+        </div>
     </div>
 
     <div class="controls">
@@ -130,9 +150,23 @@ const statusEl    = document.getElementById('status');
 const tableHint   = document.getElementById('tableHint');
 const historyBody = document.querySelector('#historyTable tbody');
 
+const queueBar      = document.getElementById('queueBar');
+const queueCount    = document.getElementById('queueCount');
+const queueThumbs   = document.getElementById('queueThumbs');
+const scanQueueBtn  = document.getElementById('scanQueueBtn');
+const clearQueueBtn = document.getElementById('clearQueueBtn');
+
 let currentImage = null;
 let historyData  = [];
 let nextId       = 1;
+
+// Photos added one at a time via "Choose from gallery". On browsers/WebViews that
+// respect the <input multiple> attribute this stays empty and multi-picks run
+// straight through runBatch() as before. On ones that don't (common in Android
+// in-app browsers/WebViews), each tap only ever returns one file — so instead of
+// silently treating that as "the only photo", it's queued here and the user can
+// keep tapping "Choose from gallery" to add more before scanning the whole set.
+let galleryQueue = [];
 
 function setStatus(msg, isError = false) {
     statusEl.textContent = msg || '';
@@ -146,7 +180,7 @@ window.addEventListener('load', () => {
     if (typeof jsQR === 'undefined')      missing.push('jsQR');
     if (missing.length) setStatus('Library failed to load: ' + missing.join(', ') + '. Check your connection / ad-blocker.', true);
     if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-        setStatus('Camera capture needs HTTPS — this page is served over ' + location.protocol + ', so "Take a photo" may fall back to file browsing.', false);
+        setStatus('This page needs HTTPS — served over ' + location.protocol + ', so camera capture and gallery picking may behave inconsistently.', false);
     }
     renderTable();
 });
@@ -179,13 +213,68 @@ function readFileAsDataURL(file) {
 
 cameraInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
 
-// Gallery supports multi-select (the <input multiple> attribute) — picking more than
-// one photo runs the whole batch straight through automatically. Picking just one keeps
-// the normal preview + manual "Scan card" flow, so nothing changes for the common case.
+// Gallery: some browsers return every photo the user multi-selected in one `change`
+// event (files.length > 1) — those run straight through as a batch, same as before.
+// Others (notably several Android in-app browsers/WebViews) only ever return one file
+// per pick, even if the OS picker itself supports multi-select. Rather than assuming
+// a single result means "that's all the user wanted", queue it and let them add more.
 galleryInput.addEventListener('change', (e) => {
     const files = Array.from(e.target.files || []);
-    if (files.length > 1) runBatch(files);
-    else handleFile(files[0]);
+    galleryInput.value = ''; // allow re-picking the same file(s) later
+    if (!files.length) return;
+
+    if (files.length > 1) {
+        if (galleryQueue.length) {
+            // Merge with anything already queued from earlier single picks.
+            const combined = [...galleryQueue.map(q => q.file), ...files];
+            clearQueue();
+            runBatch(combined);
+        } else {
+            runBatch(files);
+        }
+        return;
+    }
+
+    // Exactly one file came back — queue it instead of auto-running, so the user can
+    // add more with repeated taps before scanning.
+    addToQueue(files[0]);
+});
+
+function addToQueue(file) {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+        galleryQueue.push({ file, thumb: ev.target.result });
+        renderQueue();
+        setStatus(galleryQueue.length + ' photo(s) queued — tap "Choose from gallery" to add more, or "Scan queued photos" to process them.');
+    };
+    reader.readAsDataURL(file);
+}
+
+function clearQueue() {
+    galleryQueue = [];
+    renderQueue();
+}
+
+function renderQueue() {
+    if (!galleryQueue.length) {
+        queueBar.style.display = 'none';
+        return;
+    }
+    queueBar.style.display = 'block';
+    queueCount.textContent = galleryQueue.length + ' photo(s) queued to scan';
+    queueThumbs.innerHTML = galleryQueue.map(q => `<img src="${q.thumb}" alt="queued photo">`).join('');
+}
+
+scanQueueBtn.addEventListener('click', () => {
+    if (!galleryQueue.length) return;
+    const files = galleryQueue.map(q => q.file);
+    clearQueue();
+    runBatch(files);
+});
+
+clearQueueBtn.addEventListener('click', () => {
+    clearQueue();
+    setStatus('Queue cleared.');
 });
 
 // Core scanning pipeline, shared by the single-photo "Scan card" button and the batch
@@ -280,7 +369,7 @@ processBtn.addEventListener('click', async () => {
     }
 });
 
-// ---- Batch scan (multiple photos picked at once from the gallery) ----
+// ---- Batch scan (multiple photos, whether picked at once or queued one-by-one) ----
 async function runBatch(files) {
     if (typeof Tesseract === 'undefined' || typeof jsQR === 'undefined') {
         setStatus('OCR/QR library not loaded — see message above.', true);
@@ -289,6 +378,7 @@ async function runBatch(files) {
     cameraBtn.disabled = true;
     galleryBtn.disabled = true;
     processBtn.disabled = true;
+    scanQueueBtn.disabled = true;
 
     let ok = 0, failed = 0, flagged = 0;
     for (let i = 0; i < files.length; i++) {
@@ -312,6 +402,7 @@ async function runBatch(files) {
     cameraBtn.disabled = false;
     galleryBtn.disabled = false;
     processBtn.disabled = true;
+    scanQueueBtn.disabled = false;
 
     let msg = `Batch done — added ${ok} of ${files.length} photo(s).`;
     if (failed) msg += ` ${failed} failed to process.`;

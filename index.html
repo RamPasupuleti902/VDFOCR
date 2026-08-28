@@ -50,7 +50,12 @@
         .ai-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--teal); border: 1px solid var(--teal); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
         .saved-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
         .lowres-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--bad); border: 1px solid var(--bad); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
-        .del-btn { background: #fee2e2; color: var(--bad); border: none; border-radius: 6px; padding: 6px 9px; cursor: pointer; font-size: 14px; line-height: 1; }
+        .blurry-tag { display: inline-block; font-size: 10px; font-weight: 700; color: #b45309; border: 1px solid #b45309; border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
+        .del-btn { background: #fee2e2; color: var(--bad); border: none; border-radius: 6px; padding: 6px 9px; cursor: pointer; font-size: 14px; line-height: 1; margin-left: 4px; }
+        .raw-btn { background: #f1f5f9; color: var(--ink); }
+        .raw-btn:hover { background: #e2e8f0; }
+        .raw-row td { background: #0f172a; padding: 0; }
+        .raw-text { color: #e2e8f0; font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; margin: 0; padding: 12px 14px; max-height: 260px; overflow-y: auto; }
         .del-btn:hover { background: #fecaca; }
         .empty { color: var(--muted); font-size: 14px; padding: 14px 0; }
         footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 20px; }
@@ -106,6 +111,11 @@ const LOWRES_THRESHOLD = 900;
 // OCR/QR canvases are rendered at this size regardless of source size — small photos
 // get upscaled up to this target instead of being processed at their native (blurry) size.
 const TARGET_LONG_SIDE = 2200;
+// Variance of the Laplacian, measured on the preprocessed canvas — a rough sharpness
+// score. Below this, a photo is flagged as too blurry to trust OCR results from. This
+// is an approximate heuristic (not calibrated against a large sample of real misses),
+// so treat it as a hint to retake the photo, not a hard gate.
+const BLUR_VARIANCE_THRESHOLD = 120;
 
 const cameraInput  = document.getElementById('cameraInput');
 const galleryInput = document.getElementById('galleryInput');
@@ -177,6 +187,9 @@ processBtn.addEventListener('click', async () => {
         setStatus('Preprocessing...');
         const prepCanvas = preprocessForOCR(img);
 
+        const sharpness = laplacianVariance(prepCanvas);
+        const isBlurry = sharpness < BLUR_VARIANCE_THRESHOLD;
+
         setStatus('Scanning QR...');
         const qr = detectQR(img, prepCanvas);
 
@@ -189,18 +202,43 @@ processBtn.addEventListener('click', async () => {
         });
 
         const iccid = extractIccid(text);
+        let pin = extractField(text, 'PIN', 4);
+        let puk = extractField(text, 'PUK', 8);
+        let rawText = text;
+
+        // A hard black/white threshold is great for crisp printed text, but it can wipe
+        // out faint or dot-matrix-printed PIN/PUK digits entirely rather than misreading
+        // them — that's the "neither field found" case. If either is still missing, retry
+        // just that pass on a softer, contrast-stretched (not binarized) version instead
+        // of giving up after one attempt.
+        if (pin === 'Not Found' || puk === 'Not Found') {
+            setStatus('Retrying PIN/PUK with alternate processing...');
+            const altCanvas = preprocessForOCRAlt(img);
+            const { data: { text: text2 } } = await Tesseract.recognize(altCanvas, 'eng', {
+                logger: m => {
+                    if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
+                }
+            });
+            rawText = text + '\n----- alternate pass -----\n' + text2;
+            if (pin === 'Not Found') pin = extractField(text2, 'PIN', 4);
+            if (puk === 'Not Found') puk = extractField(text2, 'PUK', 8);
+        }
+
         const entry = {
             id: nextId++,
             time: new Date().toLocaleTimeString(),
             iccid,
             iccidLuhn: iccid !== 'Not Found' ? luhnValid(iccid) : null,
-            pin: extractField(text, 'PIN', 4),
-            puk: extractField(text, 'PUK', 8),
+            pin,
+            puk,
             lpa: qr.value || 'QR Not Found',
             img: compressImage(img, 1600, 0.85),
             aiVerified: false,
             saved: false,
-            lowRes: isLowRes
+            lowRes: isLowRes,
+            blurry: isBlurry,
+            rawText,
+            showRaw: false
         };
         historyData.unshift(entry);
         renderTable();
@@ -210,7 +248,9 @@ processBtn.addEventListener('click', async () => {
         galleryInput.value = '';
         currentImage = null;
         processBtn.disabled = true;
-        setStatus(isLowRes ? 'Record added — source photo was low resolution, please double-check the fields.' : 'Record added.');
+        if (isBlurry) setStatus('Record added — photo looks blurry, results may be unreliable. Consider retaking with a steadier hand or better light.');
+        else if (isLowRes) setStatus('Record added — source photo was low resolution, please double-check the fields.');
+        else setStatus('Record added.');
 
         if (aiToggle.checked) verifyRow(entry);   // silent unless deployed
     } catch (err) {
@@ -416,6 +456,34 @@ function preprocessForOCR(img) {
     return c;
 }
 
+// Gentler alternative to preprocessForOCR: normal grayscale (all 3 channels, not just
+// blue) with a min/max contrast stretch instead of a hard black/white cutoff. A binarized
+// threshold can erase faint, low-contrast, or dot-matrix-printed digits outright — this
+// keeps the mid-tone gradients intact, which sometimes reads where the hard threshold read
+// nothing at all. Used only as a retry when the first pass misses a field.
+function preprocessForOCRAlt(img) {
+    const c = fitCanvas(img, TARGET_LONG_SIDE);
+    const ctx = c.getContext('2d');
+    const w = c.width, h = c.height;
+    const id = ctx.getImageData(0, 0, w, h);
+    const d = id.data;
+    let gray = new Uint8ClampedArray(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) gray[p] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+
+    const srcLong = Math.max(img.width, img.height);
+    if (srcLong < TARGET_LONG_SIDE) gray = sharpenGray(gray, w, h);
+
+    let min = 255, max = 0;
+    for (let i = 0; i < gray.length; i++) { if (gray[i] < min) min = gray[i]; if (gray[i] > max) max = gray[i]; }
+    const range = Math.max(1, max - min);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+        const v = Math.round((gray[p] - min) * 255 / range);
+        d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+    }
+    ctx.putImageData(id, 0, 0);
+    return c;
+}
+
 function otsu(gray) {
     const hist = new Array(256).fill(0);
     for (let i = 0; i < gray.length; i++) hist[gray[i]]++;
@@ -431,6 +499,30 @@ function otsu(gray) {
         if (between > varMax) { varMax = between; threshold = t; }
     }
     return threshold;
+}
+
+// Rough focus check: variance of a 3x3 Laplacian over the image. Sharp, in-focus text
+// has lots of high-frequency edge content (high variance); a blurry photo smooths those
+// edges out (low variance). Sampled at stride 2 to keep this fast on a ~2200px canvas.
+function laplacianVariance(canvas) {
+    const w = canvas.width, h = canvas.height;
+    const ctx = canvas.getContext('2d');
+    const d = ctx.getImageData(0, 0, w, h).data;
+    const gray = new Float32Array(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) gray[p] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+
+    let sum = 0, sumSq = 0, count = 0;
+    const stride = 2;
+    for (let y = 1; y < h - 1; y += stride) {
+        for (let x = 1; x < w - 1; x += stride) {
+            const i = y * w + x;
+            const lap = gray[i - w] + gray[i + w] + gray[i - 1] + gray[i + 1] - 4 * gray[i];
+            sum += lap; sumSq += lap * lap; count++;
+        }
+    }
+    if (!count) return 0;
+    const mean = sum / count;
+    return sumSq / count - mean * mean;
 }
 
 // ---- Extraction ----
@@ -530,15 +622,24 @@ function renderTable() {
         historyBody.innerHTML = '<tr><td colspan="6" class="empty">No cards scanned yet.</td></tr>';
         return;
     }
-    historyBody.innerHTML = historyData.map(item => `
+    historyBody.innerHTML = historyData.map(item => {
+        const row = `
         <tr data-id="${item.id}">
-            <td>${item.time}${item.aiVerified ? '<span class="ai-tag" title="Verified by AI">AI</span>' : ''}${item.saved ? '<span class="saved-tag" title="Saved to sheet">saved</span>' : ''}${item.lowRes ? '<span class="lowres-tag" title="Source photo was low resolution — verify fields">LOW RES</span>' : ''}</td>
+            <td>${item.time}${item.aiVerified ? '<span class="ai-tag" title="Verified by AI">AI</span>' : ''}${item.saved ? '<span class="saved-tag" title="Saved to sheet">saved</span>' : ''}${item.lowRes ? '<span class="lowres-tag" title="Source photo was low resolution — verify fields">LOW RES</span>' : ''}${item.blurry ? '<span class="blurry-tag" title="Photo looks blurry — verify fields, consider retaking">BLURRY</span>' : ''}</td>
             <td><span class="edit${item.iccidLuhn === false ? ' bad' : ''}" contenteditable="true" data-field="iccid">${escapeHtml(item.iccid)}</span><span class="badge">${luhnBadge(item.iccidLuhn)}</span></td>
             <td><span class="edit" contenteditable="true" data-field="pin">${escapeHtml(item.pin)}</span></td>
             <td><span class="edit" contenteditable="true" data-field="puk">${escapeHtml(item.puk)}</span></td>
             <td class="lpa-text"><span class="edit" contenteditable="true" data-field="lpa">${escapeHtml(item.lpa)}</span></td>
-            <td><button class="del-btn" data-del="${item.id}" title="Delete row">&#128465;</button></td>
-        </tr>`).join('');
+            <td>
+                <button class="del-btn raw-btn" data-raw="${item.id}" title="Show raw OCR text">&#128269;</button>
+                <button class="del-btn" data-del="${item.id}" title="Delete row">&#128465;</button>
+            </td>
+        </tr>`;
+        const rawRow = item.showRaw
+            ? `<tr class="raw-row"><td colspan="6"><pre class="raw-text">${escapeHtml(item.rawText || '(no OCR text captured)')}</pre></td></tr>`
+            : '';
+        return row + rawRow;
+    }).join('');
 }
 
 historyBody.addEventListener('focusout', (e) => {
@@ -561,7 +662,12 @@ historyBody.addEventListener('keydown', (e) => {
 
 historyBody.addEventListener('click', (e) => {
     const del = e.target.closest('[data-del]');
-    if (del) { historyData = historyData.filter(x => x.id !== +del.dataset.del); renderTable(); }
+    if (del) { historyData = historyData.filter(x => x.id !== +del.dataset.del); renderTable(); return; }
+    const raw = e.target.closest('[data-raw]');
+    if (raw) {
+        const entry = historyData.find(x => x.id === +raw.dataset.raw);
+        if (entry) { entry.showRaw = !entry.showRaw; renderTable(); }
+    }
 });
 
 // ---- Export CSV ----

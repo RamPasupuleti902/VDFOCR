@@ -17,8 +17,11 @@
         .tr { top: 14px; right: 14px; border-left: none; border-bottom: none; border-radius: 0 8px 0 0; }
         .bl { bottom: 14px; left: 14px; border-right: none; border-top: none; border-radius: 0 0 0 8px; }
         .br { bottom: 14px; right: 14px; border-left: none; border-top: none; border-radius: 0 0 8px 0; }
-        .pick-btn { background: var(--teal); color: #fff; border: none; padding: 14px 24px; border-radius: 9px; font-weight: 600; font-size: 16px; cursor: pointer; }
+        .pick-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+        .pick-btn { background: var(--teal); color: #fff; border: none; padding: 14px 22px; border-radius: 9px; font-weight: 600; font-size: 16px; cursor: pointer; }
         .pick-btn:hover { background: var(--teal-dark); }
+        .pick-btn.secondary { background: #fff; color: var(--teal); border: 1.5px solid var(--teal); }
+        .pick-btn.secondary:hover { background: #f0fdfa; }
         .hint { color: var(--muted); font-size: 14px; margin: 12px 0 0; }
         #preview { max-width: 260px; max-height: 240px; margin: 18px auto 0; display: none; border-radius: 8px; }
         .controls { display: flex; gap: 12px; margin: 20px 0 0; }
@@ -46,6 +49,7 @@
         .warn-badge { color: var(--bad); margin-left: 4px; cursor: help; }
         .ai-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--teal); border: 1px solid var(--teal); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
         .saved-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
+        .lowres-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--bad); border: 1px solid var(--bad); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
         .del-btn { background: #fee2e2; color: var(--bad); border: none; border-radius: 6px; padding: 6px 9px; cursor: pointer; font-size: 14px; line-height: 1; }
         .del-btn:hover { background: #fecaca; }
         .empty { color: var(--muted); font-size: 14px; padding: 14px 0; }
@@ -59,9 +63,13 @@
     <div class="capture-area">
         <span class="corner tl"></span><span class="corner tr"></span>
         <span class="corner bl"></span><span class="corner br"></span>
-        <button class="pick-btn" id="pickBtn">Take a photo or choose an image</button>
-        <p class="hint">Fill the frame and keep the card flat and well lit.</p>
-        <input type="file" id="fileInput" accept="image/*" hidden>
+        <div class="pick-row">
+            <button class="pick-btn" id="cameraBtn">Take a photo</button>
+            <button class="pick-btn secondary" id="galleryBtn">Choose from gallery</button>
+        </div>
+        <p class="hint">Fill the frame and keep the card flat and well lit. Camera requires HTTPS.</p>
+        <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
+        <input type="file" id="galleryInput" accept="image/*" hidden>
         <img id="preview" alt="selected card">
     </div>
 
@@ -82,7 +90,7 @@
         </thead>
         <tbody></tbody>
     </table>
-    <div class="hint" id="tableHint" style="display:none;">Tap any value to edit it. PIN &amp; PUK have no checksum, so verify anything not marked AI. "Save to Sheet" appends new rows to your Google Sheet; Export CSV downloads them.</div>
+    <div class="hint" id="tableHint" style="display:none;">Tap any value to edit it. PIN &amp; PUK have no checksum, so verify anything not marked AI. Rows flagged <span class="lowres-tag" style="margin:0;">LOW RES</span> came from a small source photo — double-check those. "Save to Sheet" appends new rows to your Google Sheet; Export CSV downloads them.</div>
 
     <footer>QR &amp; first-pass OCR run in your browser. AI verification and Sheet saving only send data to your own endpoints.</footer>
 </div>
@@ -92,8 +100,17 @@ const FUNCTION_URL   = '/.netlify/functions/verify';   // AI verify (Netlify) �
 const SHEET_ENDPOINT = 'https://script.google.com/macros/s/AKfycbxXrrPh05ep23EKnDZT32cuMq7UDPclhi4CFL2YU9MXmzqwP16CkKTpY86Ffu0K5T6a/exec';                             // <-- paste your Apps Script /exec URL here
 const SHEET_SECRET   = 'CHANGE_ME';                    // <-- must match SECRET in Code.gs
 
-const fileInput   = document.getElementById('fileInput');
-const pickBtn     = document.getElementById('pickBtn');
+// Below this pixel size (longest side) a source photo is considered "low resolution":
+// OCR results get flagged for manual review rather than silently trusted.
+const LOWRES_THRESHOLD = 900;
+// OCR/QR canvases are rendered at this size regardless of source size — small photos
+// get upscaled up to this target instead of being processed at their native (blurry) size.
+const TARGET_LONG_SIDE = 2200;
+
+const cameraInput  = document.getElementById('cameraInput');
+const galleryInput = document.getElementById('galleryInput');
+const cameraBtn    = document.getElementById('cameraBtn');
+const galleryBtn   = document.getElementById('galleryBtn');
 const preview     = document.getElementById('preview');
 const processBtn  = document.getElementById('processBtn');
 const downloadBtn = document.getElementById('downloadBtn');
@@ -118,13 +135,16 @@ window.addEventListener('load', () => {
     if (typeof Tesseract === 'undefined') missing.push('Tesseract.js');
     if (typeof jsQR === 'undefined')      missing.push('jsQR');
     if (missing.length) setStatus('Library failed to load: ' + missing.join(', ') + '. Check your connection / ad-blocker.', true);
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+        setStatus('Camera capture needs HTTPS — this page is served over ' + location.protocol + ', so "Take a photo" may fall back to file browsing.', false);
+    }
     renderTable();
 });
 
-pickBtn.addEventListener('click', () => fileInput.click());
+cameraBtn.addEventListener('click', () => cameraInput.click());
+galleryBtn.addEventListener('click', () => galleryInput.click());
 
-fileInput.addEventListener('change', (e) => {
-    const file = e.target.files[0];
+function handleFile(file) {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
@@ -136,7 +156,9 @@ fileInput.addEventListener('change', (e) => {
     };
     reader.onerror = () => setStatus('Could not read the selected file.', true);
     reader.readAsDataURL(file);
-});
+}
+cameraInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
+galleryInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
 
 // ---- Main scan ----
 processBtn.addEventListener('click', async () => {
@@ -150,6 +172,7 @@ processBtn.addEventListener('click', async () => {
 
     try {
         const img = await loadImage(currentImage);
+        const isLowRes = Math.max(img.width, img.height) < LOWRES_THRESHOLD;
 
         setStatus('Preprocessing...');
         const prepCanvas = preprocessForOCR(img);
@@ -176,16 +199,18 @@ processBtn.addEventListener('click', async () => {
             lpa: qr.value || 'QR Not Found',
             img: compressImage(img, 1600, 0.85),
             aiVerified: false,
-            saved: false
+            saved: false,
+            lowRes: isLowRes
         };
         historyData.unshift(entry);
         renderTable();
 
         preview.style.display = 'none';
-        fileInput.value = '';
+        cameraInput.value = '';
+        galleryInput.value = '';
         currentImage = null;
         processBtn.disabled = true;
-        setStatus('Record added.');
+        setStatus(isLowRes ? 'Record added — source photo was low resolution, please double-check the fields.' : 'Record added.');
 
         if (aiToggle.checked) verifyRow(entry);   // silent unless deployed
     } catch (err) {
@@ -238,7 +263,8 @@ async function saveToSheet() {
             pin: r.pin === 'Not Found' ? '' : r.pin,
             puk: r.puk === 'Not Found' ? '' : r.puk,
             lpa: r.lpa === 'QR Not Found' ? '' : r.lpa,
-            aiVerified: !!r.aiVerified
+            aiVerified: !!r.aiVerified,
+            lowRes: !!r.lowRes
         }))
     };
 
@@ -273,14 +299,46 @@ function loadImage(src) {
     });
 }
 
+// Scales img so its longest side == size. When enlarging by more than 2x, does it in
+// two steps (each <=2x) with smoothing on, which keeps text edges noticeably crisper
+// than a single big bilinear jump — this is what actually helps low-res phone photos.
 function fitCanvas(img, size) {
     const maxSide = Math.max(img.width, img.height);
     const scale = size / maxSide;
-    const w = Math.max(1, Math.round(img.width * scale));
-    const h = Math.max(1, Math.round(img.height * scale));
+
+    if (scale <= 1) {
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        return c;
+    }
+
+    // Upscaling: step through intermediate sizes so each jump is <=2x.
+    let curW = img.width, curH = img.height;
+    let src = img;
+    while (Math.max(curW, curH) * 2 < size) {
+        curW = Math.round(curW * 2); curH = Math.round(curH * 2);
+        const step = document.createElement('canvas');
+        step.width = curW; step.height = curH;
+        const sctx = step.getContext('2d');
+        sctx.imageSmoothingEnabled = true;
+        sctx.imageSmoothingQuality = 'high';
+        sctx.drawImage(src, 0, 0, curW, curH);
+        src = step;
+    }
+    const finalScale = size / Math.max(curW, curH);
+    const w = Math.round(curW * finalScale), h = Math.round(curH * finalScale);
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
-    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, 0, 0, w, h);
     return c;
 }
 
@@ -292,6 +350,23 @@ function compressImage(img, maxSide, q) {
     c.width = w; c.height = h;
     c.getContext('2d').drawImage(img, 0, 0, w, h);
     return c.toDataURL('image/jpeg', q);
+}
+
+// Simple 3x3 unsharp-style sharpen on a grayscale buffer — helps recover edge
+// definition lost when a small source photo gets upscaled.
+function sharpenGray(gray, w, h) {
+    const out = new Uint8ClampedArray(gray.length);
+    const k = [0, -1, 0, -1, 5, -1, 0, -1, 0];
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            const i = y * w + x;
+            if (x === 0 || y === 0 || x === w - 1 || y === h - 1) { out[i] = gray[i]; continue; }
+            let sum = 0, ki = 0;
+            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { sum += gray[i + dy * w + dx] * k[ki++]; }
+            out[i] = sum;
+        }
+    }
+    return out;
 }
 
 function decodeJsQR(canvas, threshold) {
@@ -313,7 +388,7 @@ function decodeJsQR(canvas, threshold) {
 function detectQR(img, prepCanvas) {
     let v = decodeJsQR(prepCanvas, false);
     if (v) return { value: v, via: 'jsQR/prep' };
-    const rawCanvas = fitCanvas(img, 1600);
+    const rawCanvas = fitCanvas(img, TARGET_LONG_SIDE);
     v = decodeJsQR(rawCanvas, false);
     if (v) return { value: v, via: 'jsQR/raw' };
     v = decodeJsQR(rawCanvas, true);
@@ -322,13 +397,19 @@ function detectQR(img, prepCanvas) {
 }
 
 function preprocessForOCR(img) {
-    const c = fitCanvas(img, 1800);
+    const c = fitCanvas(img, TARGET_LONG_SIDE);
     const ctx = c.getContext('2d');
     const w = c.width, h = c.height;
     const id = ctx.getImageData(0, 0, w, h);
     const d = id.data;
-    const gray = new Uint8ClampedArray(w * h);
+    let gray = new Uint8ClampedArray(w * h);
     for (let i = 0, p = 0; i < d.length; i += 4, p++) gray[p] = d[i + 2]; // blue channel
+
+    // Only worth sharpening when we actually upscaled the source (i.e. it started small);
+    // on already-sharp photos this step is a no-op-ish pass and skipped to save time.
+    const srcLong = Math.max(img.width, img.height);
+    if (srcLong < TARGET_LONG_SIDE) gray = sharpenGray(gray, w, h);
+
     const t = otsu(gray);
     for (let i = 0, p = 0; i < d.length; i += 4, p++) { const v = gray[p] > t ? 255 : 0; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
     ctx.putImageData(id, 0, 0);
@@ -396,7 +477,7 @@ function renderTable() {
     }
     historyBody.innerHTML = historyData.map(item => `
         <tr data-id="${item.id}">
-            <td>${item.time}${item.aiVerified ? '<span class="ai-tag" title="Verified by AI">AI</span>' : ''}${item.saved ? '<span class="saved-tag" title="Saved to sheet">saved</span>' : ''}</td>
+            <td>${item.time}${item.aiVerified ? '<span class="ai-tag" title="Verified by AI">AI</span>' : ''}${item.saved ? '<span class="saved-tag" title="Saved to sheet">saved</span>' : ''}${item.lowRes ? '<span class="lowres-tag" title="Source photo was low resolution — verify fields">LOW RES</span>' : ''}</td>
             <td><span class="edit${item.iccidLuhn === false ? ' bad' : ''}" contenteditable="true" data-field="iccid">${escapeHtml(item.iccid)}</span><span class="badge">${luhnBadge(item.iccidLuhn)}</span></td>
             <td><span class="edit" contenteditable="true" data-field="pin">${escapeHtml(item.pin)}</span></td>
             <td><span class="edit" contenteditable="true" data-field="puk">${escapeHtml(item.puk)}</span></td>
@@ -431,10 +512,10 @@ historyBody.addEventListener('click', (e) => {
 // ---- Export CSV ----
 downloadBtn.addEventListener('click', () => {
     if (!historyData.length) { setStatus('Nothing to export yet.', true); return; }
-    let csv = 'Time,ICCID,ICCID_Valid,PIN,PUK,LPA Code,AI_Verified\n';
+    let csv = 'Time,ICCID,ICCID_Valid,PIN,PUK,LPA Code,AI_Verified,Low_Res_Source\n';
     historyData.forEach(row => {
         const valid = row.iccidLuhn === true ? 'OK' : (row.iccidLuhn === false ? 'CHECK' : '');
-        const fields = [row.time, "'" + row.iccid, valid, row.pin, row.puk, row.lpa, row.aiVerified ? 'YES' : 'NO'];
+        const fields = [row.time, "'" + row.iccid, valid, row.pin, row.puk, row.lpa, row.aiVerified ? 'YES' : 'NO', row.lowRes ? 'YES' : 'NO'];
         csv += fields.map(f => `"${String(f).replace(/"/g, '""')}"`).join(',') + '\n';
     });
     const blob = new Blob([csv], { type: 'text/csv' });

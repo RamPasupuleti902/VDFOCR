@@ -59,9 +59,6 @@
         .del-btn:hover { background: #fecaca; }
         .empty { color: var(--muted); font-size: 14px; padding: 14px 0; }
         footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 20px; }
-        /* Queue bar: shown when photos have been added one-at-a-time (e.g. Android
-           browsers/WebViews that ignore the <input multiple> attribute) so the user
-           can keep adding before scanning the whole batch together. */
         #queueBar { display: none; margin-top: 14px; background: #f0fdfa; border: 1px solid #99f6e4; border-radius: 10px; padding: 12px 14px; text-align: center; }
         #queueCount { color: var(--teal-dark); font-size: 14px; font-weight: 600; margin: 0 0 10px; }
         .queue-actions { display: flex; gap: 8px; }
@@ -125,16 +122,8 @@ const FUNCTION_URL   = '/.netlify/functions/verify';   // AI verify (Netlify) �
 const SHEET_ENDPOINT = 'https://script.google.com/macros/s/AKfycbxXrrPh05ep23EKnDZT32cuMq7UDPclhi4CFL2YU9MXmzqwP16CkKTpY86Ffu0K5T6a/exec';                             // <-- paste your Apps Script /exec URL here
 const SHEET_SECRET   = 'CHANGE_ME';                    // <-- must match SECRET in Code.gs
 
-// Below this pixel size (longest side) a source photo is considered "low resolution":
-// OCR results get flagged for manual review rather than silently trusted.
 const LOWRES_THRESHOLD = 900;
-// OCR/QR canvases are rendered at this size regardless of source size — small photos
-// get upscaled up to this target instead of being processed at their native (blurry) size.
 const TARGET_LONG_SIDE = 2200;
-// Variance of the Laplacian, measured on the preprocessed canvas — a rough sharpness
-// score. Below this, a photo is flagged as too blurry to trust OCR results from. This
-// is an approximate heuristic (not calibrated against a large sample of real misses),
-// so treat it as a hint to retake the photo, not a hard gate.
 const BLUR_VARIANCE_THRESHOLD = 120;
 
 const cameraInput  = document.getElementById('cameraInput');
@@ -160,12 +149,6 @@ let currentImage = null;
 let historyData  = [];
 let nextId       = 1;
 
-// Photos added one at a time via "Choose from gallery". On browsers/WebViews that
-// respect the <input multiple> attribute this stays empty and multi-picks run
-// straight through runBatch() as before. On ones that don't (common in Android
-// in-app browsers/WebViews), each tap only ever returns one file — so instead of
-// silently treating that as "the only photo", it's queued here and the user can
-// keep tapping "Choose from gallery" to add more before scanning the whole set.
 let galleryQueue = [];
 
 function setStatus(msg, isError = false) {
@@ -213,19 +196,13 @@ function readFileAsDataURL(file) {
 
 cameraInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
 
-// Gallery: some browsers return every photo the user multi-selected in one `change`
-// event (files.length > 1) — those run straight through as a batch, same as before.
-// Others (notably several Android in-app browsers/WebViews) only ever return one file
-// per pick, even if the OS picker itself supports multi-select. Rather than assuming
-// a single result means "that's all the user wanted", queue it and let them add more.
 galleryInput.addEventListener('change', (e) => {
     const files = Array.from(e.target.files || []);
-    galleryInput.value = ''; // allow re-picking the same file(s) later
+    galleryInput.value = '';
     if (!files.length) return;
 
     if (files.length > 1) {
         if (galleryQueue.length) {
-            // Merge with anything already queued from earlier single picks.
             const combined = [...galleryQueue.map(q => q.file), ...files];
             clearQueue();
             runBatch(combined);
@@ -235,8 +212,6 @@ galleryInput.addEventListener('change', (e) => {
         return;
     }
 
-    // Exactly one file came back — queue it instead of auto-running, so the user can
-    // add more with repeated taps before scanning.
     addToQueue(files[0]);
 });
 
@@ -277,9 +252,6 @@ clearQueueBtn.addEventListener('click', () => {
     setStatus('Queue cleared.');
 });
 
-// Core scanning pipeline, shared by the single-photo "Scan card" button and the batch
-// runner below. Takes a loaded Image and returns a fully-populated history entry
-// (without touching historyData/rendering — the caller decides when to push it in).
 async function scanImage(img) {
     const isLowRes = Math.max(img.width, img.height) < LOWRES_THRESHOLD;
 
@@ -302,8 +274,6 @@ async function scanImage(img) {
     let puk = extractField(text, 'PUK', 8);
     let rawText = text;
 
-    // Picks whichever ICCID candidate is more trustworthy: a checksum-valid one wins
-    // outright, otherwise keep any existing value over a blank "Not Found".
     function considerIccid(candidate) {
         if (candidate === 'Not Found') return;
         const candidateLuhn = luhnValid(candidate);
@@ -313,12 +283,6 @@ async function scanImage(img) {
         }
     }
 
-    // A hard black/white threshold is great for crisp printed text, but it can wipe
-    // out faint or dot-matrix-printed digits entirely, or misread a digit rather than
-    // missing it outright (a wrong-but-plausible-length ICCID that fails its checksum
-    // is the same underlying failure as PIN/PUK coming back "Not Found" — the pass
-    // just guessed wrong instead of giving up). Retry on a softer, contrast-stretched
-    // (not binarized) version whenever any field looks unreliable, not just PIN/PUK.
     let needsRetry = pin === 'Not Found' || puk === 'Not Found' || iccid === 'Not Found' || iccidLuhn === false;
     if (needsRetry) {
         setStatus('Retrying fields with alternate processing...');
@@ -334,24 +298,12 @@ async function scanImage(img) {
         if (iccid === 'Not Found' || iccidLuhn === false) considerIccid(extractIccid(text2));
     }
 
-    // Positional fallback: some cards (e.g. many Vodafone IT cards) print PIN/PUK as
-    // two bare numbers with no "PIN"/"PUK" label anywhere nearby — extractField's
-    // label search can never match those, on any pass, no matter how clean the OCR is.
-    // If a field is still missing at this point, look for it by position instead: a
-    // clean standalone 4-digit line is the PIN, a clean standalone 8-digit line is the
-    // PUK, in the order they appear (PIN is printed above PUK on the cards we've seen).
     if (pin === 'Not Found' || puk === 'Not Found') {
         const positional = extractPositionalPinPuk(rawText, iccid);
         if (pin === 'Not Found' && positional.pin) pin = positional.pin;
         if (puk === 'Not Found' && positional.puk) puk = positional.puk;
     }
 
-    // Third pass, local-adaptive threshold: for photos where a small high-contrast
-    // label (e.g. a white PIN/PUK box) sits inside a much larger, differently-colored
-    // frame (a colored card body, plus screen/browser clutter on a screenshot), a
-    // single global threshold — what both passes above use — can wash the label out
-    // entirely even though it would binarize cleanly on its own. Only worth the extra
-    // OCR pass when something is still missing after the first two attempts.
     if (pin === 'Not Found' || puk === 'Not Found' || iccid === 'Not Found' || iccidLuhn === false) {
         setStatus('Retrying with local adaptive contrast...');
         const localCanvas = preprocessForOCRLocal(img);
@@ -369,6 +321,28 @@ async function scanImage(img) {
             const positional2 = extractPositionalPinPuk(rawText, iccid);
             if (pin === 'Not Found' && positional2.pin) pin = positional2.pin;
             if (puk === 'Not Found' && positional2.puk) puk = positional2.puk;
+        }
+    }
+
+    if (pin === 'Not Found' || puk === 'Not Found') {
+        const cropCanvas = detectBrightBoxCrop(img);
+        if (cropCanvas) {
+            setStatus('Retrying by isolating the number box...');
+            const cropPrepped = preprocessCropForOCR(cropCanvas);
+            const { data: { text: text4 } } = await Tesseract.recognize(cropPrepped, 'eng', {
+                logger: m => {
+                    if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
+                }
+            });
+            rawText += '\n----- cropped-box pass -----\n' + text4;
+            if (pin === 'Not Found') pin = extractField(text4, 'PIN', 4);
+            if (puk === 'Not Found') puk = extractField(text4, 'PUK', 8);
+
+            if (pin === 'Not Found' || puk === 'Not Found') {
+                const positional3 = extractPositionalPinPuk(text4, iccid);
+                if (pin === 'Not Found' && positional3.pin) pin = positional3.pin;
+                if (puk === 'Not Found' && positional3.puk) puk = positional3.puk;
+            }
         }
     }
 
@@ -390,7 +364,6 @@ async function scanImage(img) {
     };
 }
 
-// ---- Main scan (single photo) ----
 processBtn.addEventListener('click', async () => {
     if (!currentImage) return;
     if (typeof Tesseract === 'undefined' || typeof jsQR === 'undefined') {
@@ -415,14 +388,13 @@ processBtn.addEventListener('click', async () => {
         else if (entry.lowRes) setStatus('Record added — source photo was low resolution, please double-check the fields.');
         else setStatus('Record added.');
 
-        if (aiToggle.checked) verifyRow(entry);   // silent unless deployed
+        if (aiToggle.checked) verifyRow(entry);
     } catch (err) {
         setStatus('Scan failed: ' + (err && err.message ? err.message : String(err)), true);
         processBtn.disabled = false;
     }
 });
 
-// ---- Batch scan (multiple photos, whether picked at once or queued one-by-one) ----
 async function runBatch(files) {
     if (typeof Tesseract === 'undefined' || typeof jsQR === 'undefined') {
         setStatus('OCR/QR library not loaded — see message above.', true);
@@ -445,7 +417,7 @@ async function runBatch(files) {
             renderTable();
             if (entry.blurry || entry.pin === 'Not Found' || entry.puk === 'Not Found' || entry.iccidLuhn === false) flagged++;
             ok++;
-            if (aiToggle.checked) verifyRow(entry);   // fires off in the background, doesn't block the batch
+            if (aiToggle.checked) verifyRow(entry);
         } catch (err) {
             failedNames.push(files[i].name || `photo ${i + 1}`);
             console.warn('Batch item failed (' + files[i].name + '):', err);
@@ -459,14 +431,11 @@ async function runBatch(files) {
     scanQueueBtn.disabled = false;
 
     let msg = `Batch done — added ${ok} of ${files.length} photo(s).`;
-    // Filenames instead of just a count, so a failure is actually actionable from the
-    // page itself rather than only visible in the browser console.
     if (failedNames.length) msg += ` Failed: ${failedNames.join(', ')}.`;
     if (flagged) msg += ` ${flagged} need a second look (blurry, a field missing, or a checksum mismatch) — check the tags in the table.`;
     setStatus(msg);
 }
 
-// ---- AI verification (silent if unreachable) ----
 async function callVision(dataUrl) {
     const resp = await fetch(FUNCTION_URL, {
         method: 'POST',
@@ -493,7 +462,6 @@ async function verifyRow(entry) {
     }
 }
 
-// ---- Save to Google Sheet (via Apps Script Web App) ----
 saveBtn.addEventListener('click', saveToSheet);
 
 async function saveToSheet() {
@@ -518,8 +486,6 @@ async function saveToSheet() {
     setStatus('Saving to sheet...');
     saveBtn.disabled = true;
     try {
-        // Apps Script web apps don't return CORS headers, so we fire in no-cors mode
-        // (the append still happens server-side) and mark rows saved optimistically.
         await fetch(SHEET_ENDPOINT, {
             method: 'POST',
             mode: 'no-cors',
@@ -536,7 +502,6 @@ async function saveToSheet() {
     }
 }
 
-// ---- Image helpers ----
 function loadImage(src) {
     return new Promise((resolve, reject) => {
         const img = new Image();
@@ -546,9 +511,6 @@ function loadImage(src) {
     });
 }
 
-// Scales img so its longest side == size. When enlarging by more than 2x, does it in
-// two steps (each <=2x) with smoothing on, which keeps text edges noticeably crisper
-// than a single big bilinear jump — this is what actually helps low-res phone photos.
 function fitCanvas(img, size) {
     const maxSide = Math.max(img.width, img.height);
     const scale = size / maxSide;
@@ -565,7 +527,6 @@ function fitCanvas(img, size) {
         return c;
     }
 
-    // Upscaling: step through intermediate sizes so each jump is <=2x.
     let curW = img.width, curH = img.height;
     let src = img;
     while (Math.max(curW, curH) * 2 < size) {
@@ -599,8 +560,6 @@ function compressImage(img, maxSide, q) {
     return c.toDataURL('image/jpeg', q);
 }
 
-// Simple 3x3 unsharp-style sharpen on a grayscale buffer — helps recover edge
-// definition lost when a small source photo gets upscaled.
 function sharpenGray(gray, w, h) {
     const out = new Uint8ClampedArray(gray.length);
     const k = [0, -1, 0, -1, 5, -1, 0, -1, 0];
@@ -650,10 +609,8 @@ function preprocessForOCR(img) {
     const id = ctx.getImageData(0, 0, w, h);
     const d = id.data;
     let gray = new Uint8ClampedArray(w * h);
-    for (let i = 0, p = 0; i < d.length; i += 4, p++) gray[p] = d[i + 2]; // blue channel
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) gray[p] = d[i + 2];
 
-    // Only worth sharpening when we actually upscaled the source (i.e. it started small);
-    // on already-sharp photos this step is a no-op-ish pass and skipped to save time.
     const srcLong = Math.max(img.width, img.height);
     if (srcLong < TARGET_LONG_SIDE) gray = sharpenGray(gray, w, h);
 
@@ -663,11 +620,6 @@ function preprocessForOCR(img) {
     return c;
 }
 
-// Gentler alternative to preprocessForOCR: normal grayscale (all 3 channels, not just
-// blue) with a min/max contrast stretch instead of a hard black/white cutoff. A binarized
-// threshold can erase faint, low-contrast, or dot-matrix-printed digits outright — this
-// keeps the mid-tone gradients intact, which sometimes reads where the hard threshold read
-// nothing at all. Used only as a retry when the first pass misses a field.
 function preprocessForOCRAlt(img) {
     const c = fitCanvas(img, TARGET_LONG_SIDE);
     const ctx = c.getContext('2d');
@@ -691,16 +643,6 @@ function preprocessForOCRAlt(img) {
     return c;
 }
 
-// Third-pass fallback: preprocessForOCR/Alt both pick ONE threshold for the entire
-// photo. That's fine when the card fills the frame, but a lot of real photos have a
-// small high-contrast label (e.g. a white PIN/PUK box) sitting inside a much larger,
-// differently-colored background (e.g. a dark red card, plus browser chrome/notification
-// clutter above it on a screenshot). A single global threshold gets pulled toward
-// whatever color dominates the frame, and can under- or over-expose the small patch
-// that actually matters even though that patch alone would binarize cleanly.
-// This computes Otsu's threshold separately per tile instead of once for the whole
-// image, so a bright box on a dark background gets thresholded on its own local
-// contrast regardless of what the rest of the frame looks like.
 function preprocessForOCRLocal(img, tileSize = 48) {
     const c = fitCanvas(img, TARGET_LONG_SIDE);
     const ctx = c.getContext('2d');
@@ -748,9 +690,98 @@ function otsu(gray) {
     return threshold;
 }
 
-// Rough focus check: variance of a 3x3 Laplacian over the image. Sharp, in-focus text
-// has lots of high-frequency edge content (high variance); a blurry photo smooths those
-// edges out (low variance). Sampled at stride 2 to keep this fast on a ~2200px canvas.
+function detectBrightBoxCrop(img) {
+    const DETECT_SIZE = 400;
+    const detCanvas = fitCanvas(img, DETECT_SIZE);
+    const dw = detCanvas.width, dh = detCanvas.height;
+    const dctx = detCanvas.getContext('2d');
+    const dd = dctx.getImageData(0, 0, dw, dh).data;
+
+    const bright = new Uint8Array(dw * dh);
+    for (let i = 0, p = 0; i < dd.length; i += 4, p++) {
+        const luma = dd[i] * 0.299 + dd[i + 1] * 0.587 + dd[i + 2] * 0.114;
+        bright[p] = luma > 195 ? 1 : 0;
+    }
+
+    const visited = new Uint8Array(dw * dh);
+    const queue = new Int32Array(dw * dh);
+    let best = null;
+
+    for (let y = 0; y < dh; y++) {
+        for (let x = 0; x < dw; x++) {
+            const idx = y * dw + x;
+            if (!bright[idx] || visited[idx]) continue;
+
+            let qStart = 0, qEnd = 0;
+            queue[qEnd++] = idx; visited[idx] = 1;
+            let minX = x, maxX = x, minY = y, maxY = y, area = 0;
+
+            while (qStart < qEnd) {
+                const cur = queue[qStart++];
+                const cy = (cur / dw) | 0, cx = cur % dw;
+                area++;
+                if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
+                if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+
+                if (cx > 0 && bright[cur - 1] && !visited[cur - 1]) { visited[cur - 1] = 1; queue[qEnd++] = cur - 1; }
+                if (cx < dw - 1 && bright[cur + 1] && !visited[cur + 1]) { visited[cur + 1] = 1; queue[qEnd++] = cur + 1; }
+                if (cy > 0 && bright[cur - dw] && !visited[cur - dw]) { visited[cur - dw] = 1; queue[qEnd++] = cur - dw; }
+                if (cy < dh - 1 && bright[cur + dw] && !visited[cur + dw]) { visited[cur + dw] = 1; queue[qEnd++] = cur + dw; }
+            }
+
+            const boxW = maxX - minX + 1, boxH = maxY - minY + 1;
+            const fillRatio = area / (boxW * boxH);
+            const areaFrac = area / (dw * dh);
+            const aspect = boxW / boxH;
+
+            if (areaFrac > 0.015 && areaFrac < 0.5 && fillRatio > 0.55 && aspect > 0.3 && aspect < 6) {
+                if (!best || area > best.area) best = { minX, minY, maxX, maxY, area };
+            }
+        }
+    }
+
+    if (!best) return null;
+
+    const scaleX = img.width / dw, scaleY = img.height / dh;
+    const padX = (best.maxX - best.minX) * 0.15, padY = (best.maxY - best.minY) * 0.15;
+    const sx = Math.max(0, (best.minX - padX) * scaleX);
+    const sy = Math.max(0, (best.minY - padY) * scaleY);
+    const ex = Math.min(img.width, (best.maxX + padX + 1) * scaleX);
+    const ey = Math.min(img.height, (best.maxY + padY + 1) * scaleY);
+    const sw = ex - sx, sh = ey - sy;
+    if (sw < 10 || sh < 10) return null;
+
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = Math.round(sw);
+    cropCanvas.height = Math.round(sh);
+    cropCanvas.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, cropCanvas.width, cropCanvas.height);
+    return cropCanvas;
+}
+
+function preprocessCropForOCR(cropCanvas) {
+    const targetLong = 900;
+    const maxSide = Math.max(cropCanvas.width, cropCanvas.height);
+    const scale = Math.max(1, Math.min(4, targetLong / maxSide));
+    const w = Math.max(1, Math.round(cropCanvas.width * scale));
+    const h = Math.max(1, Math.round(cropCanvas.height * scale));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(cropCanvas, 0, 0, w, h);
+
+    const id = ctx.getImageData(0, 0, w, h);
+    const d = id.data;
+    let gray = new Uint8ClampedArray(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) gray[p] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    gray = sharpenGray(gray, w, h);
+    const t = otsu(gray);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) { const v = gray[p] > t ? 255 : 0; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
+    ctx.putImageData(id, 0, 0);
+    return c;
+}
+
 function laplacianVariance(canvas) {
     const w = canvas.width, h = canvas.height;
     const ctx = canvas.getContext('2d');
@@ -772,7 +803,6 @@ function laplacianVariance(canvas) {
     return sumSq / count - mean * mean;
 }
 
-// ---- Extraction ----
 function extractIccid(text) {
     const m = text.match(/89[\d][\d\s\-]{14,24}/);
     if (m) { const digits = m[0].replace(/\D/g, ''); if (digits.length >= 18 && digits.length <= 20) return digits.slice(0, 20); }
@@ -781,12 +811,6 @@ function extractIccid(text) {
     return m2 ? m2[0] : 'Not Found';
 }
 
-// Cards print PIN/PUK as "PIN1"/"PUK1" (and sometimes a secondary "PIN2"/"PUK2"),
-// and the value isn't always on the same line as the label. The old version only
-// looked for the bare word "PIN"/"PUK" immediately followed by digits, so on any
-// card printed as "PIN1: 1234" the "1" broke the match — it would then either fail
-// or accidentally lock onto whichever PIN/PUK-like label happened to work in that
-// particular OCR pass, which is why one field or the other kept going missing.
 function extractField(text, label, count) {
     const lines = text.split(/\r?\n/);
 
@@ -816,20 +840,14 @@ function extractField(text, label, count) {
         return null;
     }
 
-    // Primary code: "LABEL1" or bare "LABEL" (but not "LABEL2", which is the secondary code).
     const primaryRe = new RegExp('\\b' + label + '\\s*1\\b|\\b' + label + '\\b(?!\\s*2)', 'i');
     let digits = search(primaryRe);
     if (digits) return digits;
 
-    // Fall back to the secondary code if that's all the card shows.
     const secondaryRe = new RegExp('\\b' + label + '\\s*2\\b', 'i');
     digits = search(secondaryRe);
     if (digits) return digits;
 
-    // No label match on this pass — the caller (scanImage) falls back to
-    // extractPositionalPinPuk() once both passes have been tried, which handles
-    // label-less cards more reliably than a per-field blind scan would (see its
-    // comment below for why).
     return 'Not Found';
 }
 
@@ -837,28 +855,45 @@ function extractField(text, label, count) {
 // anywhere on the label (common on some Vodafone IT cards) — extractField's label
 // search can never match these on any OCR pass, since there's no label to find.
 //
-// Deliberately much stricter than a blind digit-run scan: a candidate line is only
-// trusted if, once spaces/dashes are stripped, it is ENTIRELY digits and exactly 4 or
-// 8 characters long — no leftover letters or symbols. Whole-image OCR text is full of
-// stray digits (menu bars, notification badges, timestamps) that could otherwise be
-// mistaken for a PIN; a clean standalone line is a much stronger signal than a run
-// embedded in noisier text. Both fields are resolved together (rather than searching
-// twice, once per field) so the same line can't accidentally get assigned to both.
+// A candidate digit run is pulled from EACH line individually via a lookaround regex
+// (exactly 4 or 8 digits, not glued to other digits before/after), rather than requiring
+// the *entire trimmed line* to be pure digits. Real OCR output for a bordered box often
+// carries a stray leading/trailing character picked up from the box outline or an
+// adjacent line bleeding in — demanding total line purity threw those lines out even
+// when the digit run itself was read correctly, which is why this fallback kept
+// missing cards that visibly had the numbers in raw text. Spaces/dashes inside the run
+// (e.g. "1234 5678" style spacing) are still tolerated and stripped.
 function extractPositionalPinPuk(text, iccid) {
     const lines = text.split(/\r?\n/);
     let pin = null, puk = null;
+
+    function pullCleanRun(line, count) {
+        const re = new RegExp('(?<![\\d])(?:\\d[ \\-]?){' + (count - 1) + '}\\d(?![\\d])');
+        const m = line.match(re);
+        if (!m) return null;
+        const digits = m[0].replace(/[^\d]/g, '');
+        return digits.length === count ? digits : null;
+    }
 
     for (const rawLine of lines) {
         const line = rawLine.trim();
         if (!line || isActivationCodeLine(line)) continue;
 
-        const compact = line.replace(/[\s\-]/g, '');
-        if (!/^\d+$/.test(compact)) continue;          // must be a clean, pure-digit line
-        if (iccid !== 'Not Found' && compact === iccid) continue; // skip the ICCID line itself
-        if (compact.length >= 18) continue;             // ICCID-length run, not PIN/PUK
+        // Skip lines that are dominated by non-digit content (menu text, labels, etc.) —
+        // still checked BEFORE trying to pull a run, so noisy paragraphs of prose don't
+        // get scanned for incidental 4/8-digit substrings.
+        const digitCount = (line.match(/\d/g) || []).length;
+        const letterCount = (line.match(/[A-Za-z]/g) || []).length;
+        if (letterCount > digitCount) continue;
 
-        if (compact.length === 4 && !pin) pin = compact;
-        else if (compact.length === 8 && !puk) puk = compact;
+        if (!pin) {
+            const cand = pullCleanRun(line, 4);
+            if (cand && cand !== iccid && !(iccid !== 'Not Found' && iccid.includes(cand))) pin = cand;
+        }
+        if (!puk) {
+            const cand = pullCleanRun(line, 8);
+            if (cand && cand !== iccid && !(iccid !== 'Not Found' && iccid.includes(cand))) puk = cand;
+        }
 
         if (pin && puk) break;
     }
@@ -881,7 +916,6 @@ function luhnValid(num) {
     return sum % 10 === 0;
 }
 
-// ---- Render / edit / delete ----
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function luhnBadge(l) {
     if (l === true)  return '<span class="ok-badge" title="Luhn checksum OK">&#10003;</span>';
@@ -943,7 +977,6 @@ historyBody.addEventListener('click', (e) => {
     }
 });
 
-// ---- Export CSV ----
 downloadBtn.addEventListener('click', () => {
     if (!historyData.length) { setStatus('Nothing to export yet.', true); return; }
     let csv = 'Time,ICCID,ICCID_Valid,PIN,PUK,LPA Code,AI_Verified,Low_Res_Source\n';

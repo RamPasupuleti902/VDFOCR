@@ -72,9 +72,9 @@
             <button class="pick-btn" id="cameraBtn">Take a photo</button>
             <button class="pick-btn secondary" id="galleryBtn">Choose from gallery</button>
         </div>
-        <p class="hint">Fill the frame and keep the card flat and well lit. Camera requires HTTPS.</p>
+        <p class="hint">Fill the frame and keep the card flat and well lit. Camera requires HTTPS.<br>Choose from gallery supports selecting multiple photos at once for batch scanning.</p>
         <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
-        <input type="file" id="galleryInput" accept="image/*" hidden>
+        <input type="file" id="galleryInput" accept="image/*" multiple hidden>
         <img id="preview" alt="selected card">
     </div>
 
@@ -167,10 +167,88 @@ function handleFile(file) {
     reader.onerror = () => setStatus('Could not read the selected file.', true);
     reader.readAsDataURL(file);
 }
-cameraInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
-galleryInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
 
-// ---- Main scan ----
+function readFileAsDataURL(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => resolve(ev.target.result);
+        reader.onerror = () => reject(new Error('Could not read ' + file.name));
+        reader.readAsDataURL(file);
+    });
+}
+
+cameraInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
+
+// Gallery supports multi-select (the <input multiple> attribute) — picking more than
+// one photo runs the whole batch straight through automatically. Picking just one keeps
+// the normal preview + manual "Scan card" flow, so nothing changes for the common case.
+galleryInput.addEventListener('change', (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 1) runBatch(files);
+    else handleFile(files[0]);
+});
+
+// Core scanning pipeline, shared by the single-photo "Scan card" button and the batch
+// runner below. Takes a loaded Image and returns a fully-populated history entry
+// (without touching historyData/rendering — the caller decides when to push it in).
+async function scanImage(img) {
+    const isLowRes = Math.max(img.width, img.height) < LOWRES_THRESHOLD;
+
+    const prepCanvas = preprocessForOCR(img);
+    const sharpness = laplacianVariance(prepCanvas);
+    const isBlurry = sharpness < BLUR_VARIANCE_THRESHOLD;
+
+    const qr = detectQR(img, prepCanvas);
+
+    const { data: { text } } = await Tesseract.recognize(prepCanvas, 'eng', {
+        logger: m => {
+            if (m.status === 'recognizing text') setStatus('OCR: ' + Math.round(m.progress * 100) + '%');
+            else setStatus(m.status + (m.progress ? ' ' + Math.round(m.progress * 100) + '%' : ''));
+        }
+    });
+
+    const iccid = extractIccid(text);
+    let pin = extractField(text, 'PIN', 4);
+    let puk = extractField(text, 'PUK', 8);
+    let rawText = text;
+
+    // A hard black/white threshold is great for crisp printed text, but it can wipe
+    // out faint or dot-matrix-printed PIN/PUK digits entirely rather than misreading
+    // them — that's the "neither field found" case. If either is still missing, retry
+    // just that pass on a softer, contrast-stretched (not binarized) version instead
+    // of giving up after one attempt.
+    if (pin === 'Not Found' || puk === 'Not Found') {
+        setStatus('Retrying PIN/PUK with alternate processing...');
+        const altCanvas = preprocessForOCRAlt(img);
+        const { data: { text: text2 } } = await Tesseract.recognize(altCanvas, 'eng', {
+            logger: m => {
+                if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
+            }
+        });
+        rawText = text + '\n----- alternate pass -----\n' + text2;
+        if (pin === 'Not Found') pin = extractField(text2, 'PIN', 4);
+        if (puk === 'Not Found') puk = extractField(text2, 'PUK', 8);
+    }
+
+    return {
+        id: nextId++,
+        time: new Date().toLocaleTimeString(),
+        iccid,
+        iccidLuhn: iccid !== 'Not Found' ? luhnValid(iccid) : null,
+        pin,
+        puk,
+        lpa: qr.value || 'QR Not Found',
+        img: compressImage(img, 1600, 0.85),
+        aiVerified: false,
+        saved: false,
+        lowRes: isLowRes,
+        blurry: isBlurry,
+        rawText,
+        showRaw: false
+    };
+}
+
+// ---- Main scan (single photo) ----
 processBtn.addEventListener('click', async () => {
     if (!currentImage) return;
     if (typeof Tesseract === 'undefined' || typeof jsQR === 'undefined') {
@@ -182,64 +260,7 @@ processBtn.addEventListener('click', async () => {
 
     try {
         const img = await loadImage(currentImage);
-        const isLowRes = Math.max(img.width, img.height) < LOWRES_THRESHOLD;
-
-        setStatus('Preprocessing...');
-        const prepCanvas = preprocessForOCR(img);
-
-        const sharpness = laplacianVariance(prepCanvas);
-        const isBlurry = sharpness < BLUR_VARIANCE_THRESHOLD;
-
-        setStatus('Scanning QR...');
-        const qr = detectQR(img, prepCanvas);
-
-        setStatus('Reading text...');
-        const { data: { text } } = await Tesseract.recognize(prepCanvas, 'eng', {
-            logger: m => {
-                if (m.status === 'recognizing text') setStatus('OCR: ' + Math.round(m.progress * 100) + '%');
-                else setStatus(m.status + (m.progress ? ' ' + Math.round(m.progress * 100) + '%' : ''));
-            }
-        });
-
-        const iccid = extractIccid(text);
-        let pin = extractField(text, 'PIN', 4);
-        let puk = extractField(text, 'PUK', 8);
-        let rawText = text;
-
-        // A hard black/white threshold is great for crisp printed text, but it can wipe
-        // out faint or dot-matrix-printed PIN/PUK digits entirely rather than misreading
-        // them — that's the "neither field found" case. If either is still missing, retry
-        // just that pass on a softer, contrast-stretched (not binarized) version instead
-        // of giving up after one attempt.
-        if (pin === 'Not Found' || puk === 'Not Found') {
-            setStatus('Retrying PIN/PUK with alternate processing...');
-            const altCanvas = preprocessForOCRAlt(img);
-            const { data: { text: text2 } } = await Tesseract.recognize(altCanvas, 'eng', {
-                logger: m => {
-                    if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
-                }
-            });
-            rawText = text + '\n----- alternate pass -----\n' + text2;
-            if (pin === 'Not Found') pin = extractField(text2, 'PIN', 4);
-            if (puk === 'Not Found') puk = extractField(text2, 'PUK', 8);
-        }
-
-        const entry = {
-            id: nextId++,
-            time: new Date().toLocaleTimeString(),
-            iccid,
-            iccidLuhn: iccid !== 'Not Found' ? luhnValid(iccid) : null,
-            pin,
-            puk,
-            lpa: qr.value || 'QR Not Found',
-            img: compressImage(img, 1600, 0.85),
-            aiVerified: false,
-            saved: false,
-            lowRes: isLowRes,
-            blurry: isBlurry,
-            rawText,
-            showRaw: false
-        };
+        const entry = await scanImage(img);
         historyData.unshift(entry);
         renderTable();
 
@@ -248,8 +269,8 @@ processBtn.addEventListener('click', async () => {
         galleryInput.value = '';
         currentImage = null;
         processBtn.disabled = true;
-        if (isBlurry) setStatus('Record added — photo looks blurry, results may be unreliable. Consider retaking with a steadier hand or better light.');
-        else if (isLowRes) setStatus('Record added — source photo was low resolution, please double-check the fields.');
+        if (entry.blurry) setStatus('Record added — photo looks blurry, results may be unreliable. Consider retaking with a steadier hand or better light.');
+        else if (entry.lowRes) setStatus('Record added — source photo was low resolution, please double-check the fields.');
         else setStatus('Record added.');
 
         if (aiToggle.checked) verifyRow(entry);   // silent unless deployed
@@ -258,6 +279,45 @@ processBtn.addEventListener('click', async () => {
         processBtn.disabled = false;
     }
 });
+
+// ---- Batch scan (multiple photos picked at once from the gallery) ----
+async function runBatch(files) {
+    if (typeof Tesseract === 'undefined' || typeof jsQR === 'undefined') {
+        setStatus('OCR/QR library not loaded — see message above.', true);
+        return;
+    }
+    cameraBtn.disabled = true;
+    galleryBtn.disabled = true;
+    processBtn.disabled = true;
+
+    let ok = 0, failed = 0, flagged = 0;
+    for (let i = 0; i < files.length; i++) {
+        setStatus(`Processing photo ${i + 1} of ${files.length}...`);
+        try {
+            const dataUrl = await readFileAsDataURL(files[i]);
+            const img = await loadImage(dataUrl);
+            const entry = await scanImage(img);
+            historyData.unshift(entry);
+            renderTable();
+            if (entry.blurry || entry.pin === 'Not Found' || entry.puk === 'Not Found') flagged++;
+            ok++;
+            if (aiToggle.checked) verifyRow(entry);   // fires off in the background, doesn't block the batch
+        } catch (err) {
+            failed++;
+            console.warn('Batch item failed (' + files[i].name + '):', err);
+        }
+    }
+
+    galleryInput.value = '';
+    cameraBtn.disabled = false;
+    galleryBtn.disabled = false;
+    processBtn.disabled = true;
+
+    let msg = `Batch done — added ${ok} of ${files.length} photo(s).`;
+    if (failed) msg += ` ${failed} failed to process.`;
+    if (flagged) msg += ` ${flagged} need a second look (blurry or a field missing) — check the tags in the table.`;
+    setStatus(msg);
+}
 
 // ---- AI verification (silent if unreachable) ----
 async function callVision(dataUrl) {

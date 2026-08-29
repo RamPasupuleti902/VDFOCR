@@ -283,6 +283,37 @@ async function scanImage(img) {
         }
     }
 
+    // Targeted PIN/PUK box isolation pass — runs early, right after the first full-page
+    // OCR attempt, whenever either field is still missing. Diagnosed root cause: on cards
+    // that print PIN/PUK inside a thin-bordered box, the text line closest to the box's
+    // top border reliably gets corrupted when OCR'd as part of the whole photo (verified:
+    // the PIN line, which sits right under the top border, garbles far more often than the
+    // PUK line just below it, which has more clearance). Cropping tightly to the box and
+    // insetting past the border stroke itself removes that corruption source entirely.
+    // This is cheap (one small crop, one OCR call) so it's worth trying before the more
+    // expensive full-page alternate/local-adaptive retries below.
+    if (pin === 'Not Found' || puk === 'Not Found') {
+        const outlineCrop = detectOutlineBoxCrop(img);
+        if (outlineCrop) {
+            setStatus('Retrying by isolating the PIN/PUK box...');
+            const outlinePrepped = preprocessCropForOCR(outlineCrop);
+            const { data: { text: textBox } } = await Tesseract.recognize(outlinePrepped, 'eng', {
+                logger: m => {
+                    if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
+                }
+            });
+            rawText += '\n----- outline-box pass -----\n' + textBox;
+            if (pin === 'Not Found') pin = extractField(textBox, 'PIN', 4);
+            if (puk === 'Not Found') puk = extractField(textBox, 'PUK', 8);
+            if (pin === 'Not Found' && puk !== 'Not Found') pin = extractPinAbovePuk(textBox) || pin;
+            if (pin === 'Not Found' || puk === 'Not Found') {
+                const positional0 = extractPositionalPinPuk(textBox, iccid);
+                if (pin === 'Not Found' && positional0.pin) pin = positional0.pin;
+                if (puk === 'Not Found' && positional0.puk) puk = positional0.puk;
+            }
+        }
+    }
+
     let needsRetry = pin === 'Not Found' || puk === 'Not Found' || iccid === 'Not Found' || iccidLuhn === false;
     if (needsRetry) {
         setStatus('Retrying fields with alternate processing...');
@@ -298,6 +329,7 @@ async function scanImage(img) {
         if (iccid === 'Not Found' || iccidLuhn === false) considerIccid(extractIccid(text2));
     }
 
+    if (pin === 'Not Found' && puk !== 'Not Found') pin = extractPinAbovePuk(rawText) || pin;
     if (pin === 'Not Found' || puk === 'Not Found') {
         const positional = extractPositionalPinPuk(rawText, iccid);
         if (pin === 'Not Found' && positional.pin) pin = positional.pin;
@@ -317,6 +349,7 @@ async function scanImage(img) {
         if (puk === 'Not Found') puk = extractField(text3, 'PUK', 8);
         if (iccid === 'Not Found' || iccidLuhn === false) considerIccid(extractIccid(text3));
 
+        if (pin === 'Not Found' && puk !== 'Not Found') pin = extractPinAbovePuk(rawText) || pin;
         if (pin === 'Not Found' || puk === 'Not Found') {
             const positional2 = extractPositionalPinPuk(rawText, iccid);
             if (pin === 'Not Found' && positional2.pin) pin = positional2.pin;
@@ -338,6 +371,7 @@ async function scanImage(img) {
             if (pin === 'Not Found') pin = extractField(text4, 'PIN', 4);
             if (puk === 'Not Found') puk = extractField(text4, 'PUK', 8);
 
+            if (pin === 'Not Found' && puk !== 'Not Found') pin = extractPinAbovePuk(text4) || pin;
             if (pin === 'Not Found' || puk === 'Not Found') {
                 const positional3 = extractPositionalPinPuk(text4, iccid);
                 if (pin === 'Not Found' && positional3.pin) pin = positional3.pin;
@@ -758,6 +792,91 @@ function detectBrightBoxCrop(img) {
     return cropCanvas;
 }
 
+// Detects a thin bordered rectangle (outline box, not filled) — the "PIN: ____ / PUK: ____"
+// style box seen on Vodafone IT cards. Unlike detectBrightBoxCrop below (which looks for a
+// solidly FILLED bright region and requires fillRatio > 0.55), this looks for a HOLLOW
+// rectangle: a bright border stroke enclosing a mostly-dark interior with just a little
+// bright text in it, so fillRatio is expected to be low (roughly 2*stroke*(w+h)/(w*h) for a
+// thin frame), not high. Returns a canvas cropped to the box's INTERIOR, inset inward past
+// the border stroke itself — the inset is what prevents the border from corrupting the
+// nearest text line during OCR (see the comment at the outline-box retry pass above).
+function detectOutlineBoxCrop(img) {
+    const DETECT_SIZE = 500;
+    const detCanvas = fitCanvas(img, DETECT_SIZE);
+    const dw = detCanvas.width, dh = detCanvas.height;
+    const dctx = detCanvas.getContext('2d');
+    const dd = dctx.getImageData(0, 0, dw, dh).data;
+
+    const bright = new Uint8Array(dw * dh);
+    for (let i = 0, p = 0; i < dd.length; i += 4, p++) {
+        const luma = dd[i] * 0.299 + dd[i + 1] * 0.587 + dd[i + 2] * 0.114;
+        bright[p] = luma > 195 ? 1 : 0;
+    }
+
+    const visited = new Uint8Array(dw * dh);
+    const queue = new Int32Array(dw * dh);
+    let best = null;
+
+    for (let y = 0; y < dh; y++) {
+        for (let x = 0; x < dw; x++) {
+            const idx = y * dw + x;
+            if (!bright[idx] || visited[idx]) continue;
+
+            let qStart = 0, qEnd = 0;
+            queue[qEnd++] = idx; visited[idx] = 1;
+            let minX = x, maxX = x, minY = y, maxY = y, area = 0;
+
+            while (qStart < qEnd) {
+                const cur = queue[qStart++];
+                const cy = (cur / dw) | 0, cx = cur % dw;
+                area++;
+                if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
+                if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+
+                if (cx > 0 && bright[cur - 1] && !visited[cur - 1]) { visited[cur - 1] = 1; queue[qEnd++] = cur - 1; }
+                if (cx < dw - 1 && bright[cur + 1] && !visited[cur + 1]) { visited[cur + 1] = 1; queue[qEnd++] = cur + 1; }
+                if (cy > 0 && bright[cur - dw] && !visited[cur - dw]) { visited[cur - dw] = 1; queue[qEnd++] = cur - dw; }
+                if (cy < dh - 1 && bright[cur + dw] && !visited[cur + dw]) { visited[cur + dw] = 1; queue[qEnd++] = cur + dw; }
+            }
+
+            const boxW = maxX - minX + 1, boxH = maxY - minY + 1;
+            const fillRatio = area / (boxW * boxH);
+            const areaFrac = (boxW * boxH) / (dw * dh);
+            const aspect = boxW / boxH;
+
+            // Wide, thin-bordered rectangle: modest area, low fill (hollow), aspect
+            // consistent with a two-line PIN/PUK label box rather than square-ish noise.
+            if (areaFrac > 0.02 && areaFrac < 0.45 && fillRatio > 0.015 && fillRatio < 0.35 &&
+                aspect > 1.8 && aspect < 8 && boxW > dw * 0.15) {
+                if (!best || boxW * boxH > best.w * best.h) {
+                    best = { minX, minY, maxX, maxY, w: boxW, h: boxH };
+                }
+            }
+        }
+    }
+
+    if (!best) return null;
+
+    const scaleX = img.width / dw, scaleY = img.height / dh;
+    const outerW = (best.maxX - best.minX) * scaleX;
+    const outerH = (best.maxY - best.minY) * scaleY;
+    const insetX = outerW * 0.06;
+    const insetY = outerH * 0.10;
+
+    const sx = Math.max(0, best.minX * scaleX + insetX);
+    const sy = Math.max(0, best.minY * scaleY + insetY);
+    const ex = Math.min(img.width, best.maxX * scaleX - insetX);
+    const ey = Math.min(img.height, best.maxY * scaleY - insetY);
+    const sw = ex - sx, sh = ey - sy;
+    if (sw < 10 || sh < 10) return null;
+
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = Math.round(sw);
+    cropCanvas.height = Math.round(sh);
+    cropCanvas.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, cropCanvas.width, cropCanvas.height);
+    return cropCanvas;
+}
+
 function preprocessCropForOCR(cropCanvas) {
     const targetLong = 900;
     const maxSide = Math.max(cropCanvas.width, cropCanvas.height);
@@ -811,14 +930,31 @@ function extractIccid(text) {
     return m2 ? m2[0] : 'Not Found';
 }
 
+// Common OCR digit/letter confusions seen inside bordered PIN/PUK boxes.
+// Applied ONLY to the candidate substring after a label ("PIN"/"PUK") has
+// already been located (or to an already digit-dominant line in the
+// positional fallback) — never to a raw line before label search, so it
+// can never corrupt the "PIN"/"PUK" text itself into something unmatchable.
+function normalizeDigitsOCR(s) {
+    return s
+        .replace(/[oO]/g, '0')
+        .replace(/[lI|]/g, '1')
+        .replace(/[sS]/g, '5')
+        .replace(/[bB]/g, '8')
+        .replace(/[gG]/g, '6')
+        .replace(/[zZ]/g, '2')
+        .replace(/[qQ]/g, '0');
+}
+
 function extractField(text, label, count) {
     const lines = text.split(/\r?\n/);
 
     function pullDigits(str) {
-        const re = new RegExp('(?<!\\d)(?:\\d[ \\-]?){' + (count - 1) + '}\\d(?!\\d)');
-        const m = str.match(re);
+        const norm = normalizeDigitsOCR(str);
+        const re = new RegExp('(?<![\\dA-Za-z])(?:[\\dA-Za-z][ \\-]?){' + (count - 1) + '}[\\dA-Za-z](?![\\dA-Za-z])');
+        const m = norm.match(re);
         if (!m) return null;
-        const digits = m[0].replace(/\D/g, '');
+        const digits = m[0].replace(/[^\d]/g, '');
         return digits.length === count ? digits : null;
     }
 
@@ -862,14 +998,43 @@ function extractField(text, label, count) {
 // adjacent line bleeding in — demanding total line purity threw those lines out even
 // when the digit run itself was read correctly, which is why this fallback kept
 // missing cards that visibly had the numbers in raw text. Spaces/dashes inside the run
-// (e.g. "1234 5678" style spacing) are still tolerated and stripped.
+// (e.g. "1234 5678" style spacing) are still tolerated and stripped. Letter/digit
+// confusions (O/0, l/1, S/5, B/8, G/6, Z/2, Q/0) are normalized on each candidate line
+// before pulling the run, same as extractField.
+// When the "PIN" label itself gets OCR-corrupted (e.g. read as "PN" with the I dropped,
+// or "P1N", "PlN") but the "PUK" label right below it stays intact — which we've seen
+// happen in practice — extractField's label regex never finds the PIN line at all, and
+// falling through to the generic positional scan risks picking up an unrelated 4-digit
+// run elsewhere in noisy OCR text before it reaches the real one.
+// These cards always print PIN directly above PUK in the same box, so once PUK's label
+// is located reliably, the line(s) immediately above it are checked for a clean 4-digit
+// run — anchoring on the reliable label instead of the possibly-corrupted one.
+function extractPinAbovePuk(text, count = 4) {
+    const lines = text.split(/\r?\n/);
+    const pukRe = /\bPUK\s*1\b|\bPUK\b(?!\s*2)/i;
+    for (let li = 0; li < lines.length; li++) {
+        if (!pukRe.test(lines[li])) continue;
+        for (let off = 1; off <= 2 && li - off >= 0; off++) {
+            const norm = normalizeDigitsOCR(lines[li - off]);
+            const re = new RegExp('(?<![\\dA-Za-z])(?:[\\dA-Za-z][ \\-]?){' + (count - 1) + '}[\\dA-Za-z](?![\\dA-Za-z])');
+            const m = norm.match(re);
+            if (m) {
+                const digits = m[0].replace(/[^\d]/g, '');
+                if (digits.length === count) return digits;
+            }
+        }
+    }
+    return null;
+}
+
 function extractPositionalPinPuk(text, iccid) {
     const lines = text.split(/\r?\n/);
     let pin = null, puk = null;
 
     function pullCleanRun(line, count) {
-        const re = new RegExp('(?<![\\d])(?:\\d[ \\-]?){' + (count - 1) + '}\\d(?![\\d])');
-        const m = line.match(re);
+        const norm = normalizeDigitsOCR(line);
+        const re = new RegExp('(?<![\\dA-Za-z])(?:[\\dA-Za-z][ \\-]?){' + (count - 1) + '}[\\dA-Za-z](?![\\dA-Za-z])');
+        const m = norm.match(re);
         if (!m) return null;
         const digits = m[0].replace(/[^\d]/g, '');
         return digits.length === count ? digits : null;

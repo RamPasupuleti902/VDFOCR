@@ -568,6 +568,38 @@ function heuristicPinBox(img) {
     return c;
 }
 
+/* ============================================================================
+   Persistent GENERAL OCR worker. Tesseract.recognize() spins up a fresh worker AND
+   reloads the language model on every call — with 5–6 passes per card that reload was
+   the bulk of the scan time. One cached worker, reused for every pass, removes it.
+   _ocrLabel lets the shared creation-time logger show the right progress label.
+   ========================================================================== */
+let _ocrWorker = null, _ocrWorkerPromise = null, _ocrLabel = 'OCR';
+async function getOcrWorker() {
+    if (_ocrWorker) return _ocrWorker;
+    if (typeof Tesseract === 'undefined' || typeof Tesseract.createWorker !== 'function') return null;
+    if (!_ocrWorkerPromise) {
+        _ocrWorkerPromise = (async () => {
+            const w = await Tesseract.createWorker('eng', 1, {
+                logger: m => { if (m && m.status === 'recognizing text') setStatus(_ocrLabel + ': ' + Math.round(m.progress * 100) + '%'); }
+            });
+            _ocrWorker = w;
+            return w;
+        })();
+    }
+    try { return await _ocrWorkerPromise; }
+    catch (e) { console.warn('OCR worker init failed:', e); _ocrWorkerPromise = null; return null; }
+}
+// Shared-worker OCR — returns recognized text. Falls back to a one-off recognize if a
+// worker can't be created, so functionality is preserved even then (just slower).
+async function ocrText(canvas, label) {
+    _ocrLabel = label || 'OCR';
+    const w = await getOcrWorker();
+    if (w) { const { data: { text } } = await w.recognize(canvas); return text || ''; }
+    const { data: { text } } = await Tesseract.recognize(canvas, 'eng');
+    return text || '';
+}
+
 async function scanImage(img) {
     const isLowRes = Math.max(img.width, img.height) < LOWRES_THRESHOLD;
 
@@ -577,42 +609,23 @@ async function scanImage(img) {
 
     const qr = detectQR(img, prepCanvas);
 
-    const { data: { text } } = await Tesseract.recognize(prepCanvas, 'eng', {
-        logger: m => {
-            if (m.status === 'recognizing text') setStatus('OCR: ' + Math.round(m.progress * 100) + '%');
-            else setStatus(m.status + (m.progress ? ' ' + Math.round(m.progress * 100) + '%' : ''));
-        }
-    });
+    // ICCID from the Code128 barcode first (authoritative), printed-digit OCR as fallback.
+    let iccid = 'Not Found', iccidLuhn = null, iccidFromBc = false;
+    let pin = 'Not Found', puk = 'Not Found';
+    let rawText = '';
 
-    let iccid = extractIccid(text);
-    let iccidLuhn = iccid !== 'Not Found' ? luhnValid(iccid) : null;
-    let iccidFromBc = false;
-    let pin = extractField(text, 'PIN', 4);
-    let puk = extractField(text, 'PUK', 8);
-    let rawText = text;
-
-    // Authoritative ICCID from the Code128 barcode. Runs on every scan (not just on
-    // failure) because a clean barcode read beats even a Luhn-passing OCR guess — this
-    // is the fix for cards where the printed ICCID line OCR'd to "Not Found".
     try {
         setStatus('Reading ICCID barcode...');
         const bcIccid = await iccidFromBarcode(img);
         if (bcIccid) {
-            iccid = bcIccid;
-            iccidLuhn = luhnValid(bcIccid);
-            iccidFromBc = true;
-            rawText += '\n----- barcode ICCID -----\n' + bcIccid;
+            iccid = bcIccid; iccidLuhn = luhnValid(bcIccid); iccidFromBc = true;
+            rawText += '----- barcode ICCID -----\n' + bcIccid;
         } else {
-            // Barcode wouldn't decode — fall back to OCR of the printed digit line
-            // underneath it. Keeps only a Luhn-valid 89… number, so a stray extra digit
-            // read off the bars gets trimmed to the correct 19/20-digit ICCID.
+            // Barcode wouldn't decode — fall back to OCR of the printed digit line, keeping
+            // only a Luhn-valid 89… number (trims any stray digit read off the bars).
             setStatus('Barcode unreadable — reading printed ICCID digits...');
             const ptIccid = await iccidFromPrintedText(img);
-            if (ptIccid) {
-                iccid = ptIccid;
-                iccidLuhn = luhnValid(ptIccid);
-                rawText += '\n----- printed ICCID line (OCR) -----\n' + ptIccid;
-            }
+            if (ptIccid) { iccid = ptIccid; iccidLuhn = luhnValid(ptIccid); rawText += '----- printed ICCID line (OCR) -----\n' + ptIccid; }
         }
     } catch (e) { console.warn('barcode ICCID skipped:', e); }
 
@@ -623,6 +636,33 @@ async function scanImage(img) {
         if (candidateLuhn === true || iccid === 'Not Found') {
             iccid = candidate;
             iccidLuhn = candidateLuhn;
+        }
+    }
+
+    // FAST PATH: OCR only the small PIN/PUK box with the shared worker. On a clean capture
+    // this reads both numbers, so the slow full-page passes below are skipped entirely —
+    // this is the main speedup (small crop + no per-pass worker reload).
+    const boxCropFast = detectOutlineBoxCrop(img) || heuristicPinBox(img);
+    if (boxCropFast) {
+        setStatus('Reading PIN / PUK...');
+        const boxText = await ocrText(preprocessCropForOCR(boxCropFast), 'OCR');
+        rawText += '\n----- pin/puk box pass -----\n' + boxText;
+        pin = extractField(boxText, 'PIN', 4);
+        puk = extractField(boxText, 'PUK', 8);
+        if (pin === 'Not Found' && puk !== 'Not Found') pin = extractPinAbovePuk(boxText) || pin;
+        if (pin === 'Not Found' || puk === 'Not Found') {
+            const p0 = extractPositionalPinPuk(boxText, iccid);
+            if (pin === 'Not Found' && p0.pin) pin = p0.pin;
+            if (puk === 'Not Found' && p0.puk) puk = p0.puk;
+        }
+        if (pin === 'Not Found' || puk === 'Not Found') {
+            const dt = await ocrDigitsWhitelist(boxCropFast);
+            if (dt) {
+                rawText += '\n----- digit-whitelist box pass -----\n' + dt;
+                const pp = parsePinPukFromDigits(dt);
+                if (pin === 'Not Found' && pp.pin) pin = pp.pin;
+                if (puk === 'Not Found' && pp.puk) puk = pp.puk;
+            }
         }
     }
 
@@ -640,11 +680,7 @@ async function scanImage(img) {
         if (outlineCrop) {
             setStatus('Retrying by isolating the PIN/PUK box...');
             const outlinePrepped = preprocessCropForOCR(outlineCrop);
-            const { data: { text: textBox } } = await Tesseract.recognize(outlinePrepped, 'eng', {
-                logger: m => {
-                    if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
-                }
-            });
+            const textBox = await ocrText(outlinePrepped, 'Retry OCR');
             rawText += '\n----- outline-box pass -----\n' + textBox;
             if (pin === 'Not Found') pin = extractField(textBox, 'PIN', 4);
             if (puk === 'Not Found') puk = extractField(textBox, 'PUK', 8);
@@ -661,12 +697,8 @@ async function scanImage(img) {
     if (needsRetry) {
         setStatus('Retrying fields with alternate processing...');
         const altCanvas = preprocessForOCRAlt(img);
-        const { data: { text: text2 } } = await Tesseract.recognize(altCanvas, 'eng', {
-            logger: m => {
-                if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
-            }
-        });
-        rawText = text + '\n----- alternate pass -----\n' + text2;
+        const text2 = await ocrText(altCanvas, 'Retry OCR');
+        rawText += '\n----- alternate pass -----\n' + text2;
         if (pin === 'Not Found') pin = extractField(text2, 'PIN', 4);
         if (puk === 'Not Found') puk = extractField(text2, 'PUK', 8);
         if (iccid === 'Not Found' || iccidLuhn === false) considerIccid(extractIccid(text2));
@@ -682,11 +714,7 @@ async function scanImage(img) {
     if (pin === 'Not Found' || puk === 'Not Found' || iccid === 'Not Found' || iccidLuhn === false) {
         setStatus('Retrying with local adaptive contrast...');
         const localCanvas = preprocessForOCRLocal(img);
-        const { data: { text: text3 } } = await Tesseract.recognize(localCanvas, 'eng', {
-            logger: m => {
-                if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
-            }
-        });
+        const text3 = await ocrText(localCanvas, 'Retry OCR');
         rawText += '\n----- local-adaptive pass -----\n' + text3;
         if (pin === 'Not Found') pin = extractField(text3, 'PIN', 4);
         if (puk === 'Not Found') puk = extractField(text3, 'PUK', 8);
@@ -705,11 +733,7 @@ async function scanImage(img) {
         if (cropCanvas) {
             setStatus('Retrying by isolating the number box...');
             const cropPrepped = preprocessCropForOCR(cropCanvas);
-            const { data: { text: text4 } } = await Tesseract.recognize(cropPrepped, 'eng', {
-                logger: m => {
-                    if (m.status === 'recognizing text') setStatus('Retry OCR: ' + Math.round(m.progress * 100) + '%');
-                }
-            });
+            const text4 = await ocrText(cropPrepped, 'Retry OCR');
             rawText += '\n----- cropped-box pass -----\n' + text4;
             if (pin === 'Not Found') pin = extractField(text4, 'PIN', 4);
             if (puk === 'Not Found') puk = extractField(text4, 'PUK', 8);
@@ -1472,4 +1496,3 @@ downloadBtn.addEventListener('click', () => {
 
 </body>
 </html>
-

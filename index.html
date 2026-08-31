@@ -6,6 +6,10 @@
     <title>eSIM Card Scanner</title>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+    <!-- ZXing: second decoder used both for QR fallback and for reading the ICCID Code128
+         barcode directly (deterministic, not OCR-dependent). Loaded best-effort; every
+         call site no-ops gracefully if this script is blocked, leaving jsQR + OCR intact. -->
+    <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
     <style>
         :root { --teal:#0f766e; --teal-dark:#115e59; --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --bad:#c5221f; --ok:#15803d; }
         * { box-sizing: border-box; }
@@ -48,6 +52,7 @@
         .ok-badge { color: var(--ok); margin-left: 4px; cursor: help; }
         .warn-badge { color: var(--bad); margin-left: 4px; cursor: help; }
         .ai-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--teal); border: 1px solid var(--teal); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
+        .bc-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
         .saved-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
         .lowres-tag { display: inline-block; font-size: 10px; font-weight: 700; color: var(--bad); border: 1px solid var(--bad); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
         .blurry-tag { display: inline-block; font-size: 10px; font-weight: 700; color: #b45309; border: 1px solid #b45309; border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
@@ -67,37 +72,41 @@
         #clearQueueBtn:hover { background: #f8fafc; }
         .thumb-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-bottom: 10px; }
         .thumb-row img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; border: 1px solid #cbd5e1; }
+        .viewfinder { position: relative; background: #000; border-radius: 14px; overflow: hidden; aspect-ratio: 3 / 4; max-height: 62vh; margin: 0 auto; }
+        #video { width: 100%; height: 100%; object-fit: cover; display: block; background: #000; }
+        #overlay { position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 2px rgba(255,255,255,.25); border-radius: 14px; transition: box-shadow .1s, background .1s; }
+        #overlay.flash { box-shadow: inset 0 0 0 5px #22c55e; background: rgba(34,197,94,.14); }
+        .chips { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; }
+        .chip { font-size: 12px; font-weight: 700; color: #fff; background: rgba(15,23,42,.55); border-radius: 20px; padding: 4px 10px; }
+        .chip.chip-on { background: var(--ok); }
+        .cam-controls { display: flex; gap: 10px; margin: 16px 0 0; flex-wrap: wrap; }
+        .cam-controls button { flex: 1; min-width: 120px; padding: 14px; border-radius: 9px; font-weight: 600; font-size: 15px; cursor: pointer; }
+        #stopBtn, #captureBtn, #torchBtn { background: #fff; color: var(--ink); border: 1px solid #cbd5e1; }
+        #captureBtn { color: var(--teal); border-color: var(--teal); font-weight: 700; }
+        #stopBtn:hover, #captureBtn:hover, #torchBtn:hover { background: #f8fafc; }
         @media (max-width: 560px) { .controls { flex-direction: column; } .container { padding: 18px; } }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <div class="capture-area">
-        <span class="corner tl"></span><span class="corner tr"></span>
-        <span class="corner bl"></span><span class="corner br"></span>
-        <div class="pick-row">
-            <button class="pick-btn" id="cameraBtn">Take a photo</button>
-            <button class="pick-btn secondary" id="galleryBtn">Choose from gallery</button>
-        </div>
-        <p class="hint">Fill the frame and keep the card flat and well lit. Camera requires HTTPS.<br>Pick multiple photos at once where your browser supports it, or tap "Choose from gallery" repeatedly to add photos one at a time — either way they'll show up below to scan together.</p>
-        <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
-        <input type="file" id="galleryInput" accept="image/*" multiple hidden>
-        <img id="preview" alt="selected card">
-
-        <div id="queueBar">
-            <div class="thumb-row" id="queueThumbs"></div>
-            <p id="queueCount"></p>
-            <div class="queue-actions">
-                <button class="scan-btn" id="scanQueueBtn">Scan queued photos</button>
-                <button id="clearQueueBtn">Clear</button>
-            </div>
+    <div class="viewfinder">
+        <video id="video" playsinline muted autoplay></video>
+        <div id="overlay"></div>
+        <div class="chips">
+            <span class="chip" id="chipQR">&#9675; QR</span>
+            <span class="chip" id="chipICCID">&#9675; ICCID</span>
         </div>
     </div>
+    <p class="hint">Tap <b>Start camera</b>, then hold the eSIM card up to the rear camera — it reads the QR, ICCID barcode, PIN and PUK automatically, like scanning a QR code. Camera needs HTTPS. Nothing is uploaded; it all runs on your device.</p>
 
-    <div class="controls">
-        <button class="scan-btn" id="processBtn" disabled>Scan card</button>
+    <div class="cam-controls">
+        <button class="scan-btn" id="startBtn">Start camera</button>
+        <button id="stopBtn" style="display:none;">Stop</button>
+        <button id="captureBtn" style="display:none;">Capture now</button>
+        <button id="torchBtn" style="display:none;">Torch: off</button>
     </div>
+
     <div class="controls sub">
         <button class="save-btn" id="saveBtn">Save to Sheet</button>
         <button class="export-btn" id="downloadBtn">Export CSV</button>
@@ -112,9 +121,9 @@
         </thead>
         <tbody></tbody>
     </table>
-    <div class="hint" id="tableHint" style="display:none;">Tap any value to edit it. PIN &amp; PUK have no checksum, so verify anything not marked AI. Rows flagged <span class="lowres-tag" style="margin:0;">LOW RES</span> came from a small source photo — double-check those. "Save to Sheet" appends new rows to your Google Sheet; Export CSV downloads them.</div>
+    <div class="hint" id="tableHint" style="display:none;">Tap any value to edit it. PIN &amp; PUK have no checksum, so verify anything not marked AI. An ICCID marked <span class="bc-tag" style="margin:0;">BARCODE</span> was read from the Code128 barcode and is reliable. Rows flagged <span class="lowres-tag" style="margin:0;">LOW RES</span> came from a small source photo — double-check those. "Save to Sheet" appends new rows to your Google Sheet; Export CSV downloads them.</div>
 
-    <footer>QR &amp; first-pass OCR run in your browser. AI verification and Sheet saving only send data to your own endpoints.</footer>
+    <footer>QR, barcode &amp; first-pass OCR run in your browser. AI verification and Sheet saving only send data to your own endpoints.</footer>
 </div>
 
 <script>
@@ -126,12 +135,14 @@ const LOWRES_THRESHOLD = 900;
 const TARGET_LONG_SIDE = 2200;
 const BLUR_VARIANCE_THRESHOLD = 120;
 
-const cameraInput  = document.getElementById('cameraInput');
-const galleryInput = document.getElementById('galleryInput');
-const cameraBtn    = document.getElementById('cameraBtn');
-const galleryBtn   = document.getElementById('galleryBtn');
-const preview     = document.getElementById('preview');
-const processBtn  = document.getElementById('processBtn');
+const video      = document.getElementById('video');
+const overlay    = document.getElementById('overlay');
+const startBtn   = document.getElementById('startBtn');
+const stopBtn    = document.getElementById('stopBtn');
+const captureBtn = document.getElementById('captureBtn');
+const torchBtn   = document.getElementById('torchBtn');
+const chipQR     = document.getElementById('chipQR');
+const chipICCID  = document.getElementById('chipICCID');
 const downloadBtn = document.getElementById('downloadBtn');
 const saveBtn     = document.getElementById('saveBtn');
 const aiToggle    = document.getElementById('aiToggle');
@@ -139,17 +150,8 @@ const statusEl    = document.getElementById('status');
 const tableHint   = document.getElementById('tableHint');
 const historyBody = document.querySelector('#historyTable tbody');
 
-const queueBar      = document.getElementById('queueBar');
-const queueCount    = document.getElementById('queueCount');
-const queueThumbs   = document.getElementById('queueThumbs');
-const scanQueueBtn  = document.getElementById('scanQueueBtn');
-const clearQueueBtn = document.getElementById('clearQueueBtn');
-
-let currentImage = null;
 let historyData  = [];
 let nextId       = 1;
-
-let galleryQueue = [];
 
 function setStatus(msg, isError = false) {
     statusEl.textContent = msg || '';
@@ -162,95 +164,401 @@ window.addEventListener('load', () => {
     if (typeof Tesseract === 'undefined') missing.push('Tesseract.js');
     if (typeof jsQR === 'undefined')      missing.push('jsQR');
     if (missing.length) setStatus('Library failed to load: ' + missing.join(', ') + '. Check your connection / ad-blocker.', true);
+    // ZXing is an enhancement, not a hard requirement — warn softly only.
+    if (typeof ZXing === 'undefined') console.warn('ZXing not loaded — barcode ICCID and ZXing QR fallback disabled; jsQR + OCR still active.');
     if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-        setStatus('This page needs HTTPS — served over ' + location.protocol + ', so camera capture and gallery picking may behave inconsistently.', false);
+        setStatus('This page needs HTTPS — served over ' + location.protocol + ', so the live camera will not start. Open it over https://.', false);
     }
     renderTable();
 });
 
-cameraBtn.addEventListener('click', () => cameraInput.click());
-galleryBtn.addEventListener('click', () => galleryInput.click());
+/* ============================================================================
+   LIVE CAMERA SCANNER
+   Opens the rear camera and continuously scans the video feed — exactly like a QR
+   scanner. A fast loop watches for the QR (jsQR + ZXing) and the ICCID barcode
+   (ZXing) and lights the chips. The moment a NEW, stable QR is seen it grabs a
+   full-resolution still from the video and runs the SAME scanImage() pipeline that
+   reads ICCID + PIN + PUK, then adds the row. Nothing is uploaded and no photo file
+   is created — frames stay in memory on the device.
+   ========================================================================== */
+let stream = null;          // active MediaStream
+let videoTrack = null;      // its video track (for torch)
+let scanning = false;       // camera live + loop running
+let busy = false;           // a full OCR capture is in progress (pauses detection)
+let torchOn = false;
+let scanTimer = null;
+let lastSavedQR = null;     // dedupe key: don't re-capture the card being held
+let stableQR = null, stableCount = 0;
 
-function handleFile(file) {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-        currentImage = ev.target.result;
-        preview.src = currentImage;
-        preview.style.display = 'block';
-        processBtn.disabled = false;
-        setStatus('');
-    };
-    reader.onerror = () => setStatus('Could not read the selected file.', true);
-    reader.readAsDataURL(file);
+const scanCanvas = document.createElement('canvas');   // small — fast live detection
+const grabCanvas = document.createElement('canvas');   // full-res — the OCR capture
+
+function setChip(el, on, label) {
+    el.classList.toggle('chip-on', !!on);
+    el.innerHTML = (on ? '&#9679; ' : '&#9675; ') + label;
+}
+function resetChips() { setChip(chipQR, false, 'QR'); setChip(chipICCID, false, 'ICCID'); }
+
+async function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setStatus('This browser can’t open the camera. Use Chrome on Android, over HTTPS.', true); return;
+    }
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+        setStatus('Camera needs HTTPS. Open this page over https:// and try again.', true); return;
+    }
+    if (typeof Tesseract === 'undefined' || typeof jsQR === 'undefined') {
+        setStatus('OCR/QR library not loaded — check your connection / ad-blocker.', true); return;
+    }
+    try {
+        setStatus('Starting camera…');
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 1440 } },
+            audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+        videoTrack = stream.getVideoTracks()[0];
+        setupTorch();
+        startBtn.style.display = 'none';
+        stopBtn.style.display = '';
+        captureBtn.style.display = '';
+        scanning = true; busy = false;
+        lastSavedQR = null; stableQR = null; stableCount = 0;
+        resetChips();
+        setStatus('Point at the card — hold steady. It locks the QR like a scanner, then reads the rest. Good light helps.');
+        loopScan();
+    } catch (err) {
+        setStatus('Could not start camera: ' + (err && err.message ? err.message : err) + '. Check the camera permission for this site.', true);
+    }
 }
 
-function readFileAsDataURL(file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (ev) => resolve(ev.target.result);
-        reader.onerror = () => reject(new Error('Could not read ' + file.name));
-        reader.readAsDataURL(file);
-    });
+function stopCamera() {
+    scanning = false;
+    if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    videoTrack = null; torchOn = false;
+    try { video.srcObject = null; } catch (e) {}
+    startBtn.style.display = '';
+    stopBtn.style.display = 'none';
+    captureBtn.style.display = 'none';
+    torchBtn.style.display = 'none';
+    resetChips();
+    setStatus('Camera stopped.');
 }
 
-cameraInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
+function setupTorch() {
+    torchOn = false;
+    try {
+        const caps = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
+        if (caps && caps.torch) { torchBtn.style.display = ''; torchBtn.textContent = 'Torch: off'; }
+        else torchBtn.style.display = 'none';
+    } catch (e) { torchBtn.style.display = 'none'; }
+}
+async function toggleTorch() {
+    if (!videoTrack) return;
+    try {
+        torchOn = !torchOn;
+        await videoTrack.applyConstraints({ advanced: [{ torch: torchOn }] });
+        torchBtn.textContent = 'Torch: ' + (torchOn ? 'on' : 'off');
+    } catch (e) { setStatus('Torch not available on this camera.', false); }
+}
 
-galleryInput.addEventListener('change', (e) => {
-    const files = Array.from(e.target.files || []);
-    galleryInput.value = '';
-    if (!files.length) return;
+// Draw the current video frame into a canvas. longSide=0 keeps native resolution.
+function frameToCanvas(canvas, longSide) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return null;
+    const scale = longSide ? Math.min(1, longSide / Math.max(vw, vh)) : 1;
+    canvas.width = Math.max(1, Math.round(vw * scale));
+    canvas.height = Math.max(1, Math.round(vh * scale));
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas;
+}
 
-    if (files.length > 1) {
-        if (galleryQueue.length) {
-            const combined = [...galleryQueue.map(q => q.file), ...files];
-            clearQueue();
-            runBatch(combined);
-        } else {
-            runBatch(files);
+// Fast detection tick (~3–4/sec). Lights the chips and auto-captures on a new stable QR.
+function loopScan() {
+    if (!scanning) return;
+    if (!busy) {
+        try {
+            const c = frameToCanvas(scanCanvas, 1000);
+            if (c) {
+                let qrVal = decodeJsQR(c, false);
+                if (!qrVal) { initReaders(); qrVal = zxDecode(_qrReader, c); }
+                setChip(chipQR, !!qrVal, 'QR');
+
+                initReaders();
+                const bcVal = zxDecode(_barReader, c);
+                const bcOk = !!(bcVal && /^89\d{16,18}$/.test(bcVal.replace(/\D/g, '')));
+                setChip(chipICCID, bcOk, 'ICCID');
+
+                if (qrVal) {
+                    if (qrVal === stableQR) stableCount++;
+                    else { stableQR = qrVal; stableCount = 1; }
+                    // 2 consecutive matching reads = steady enough to capture; dedupe on the card held.
+                    if (stableCount >= 2 && qrVal !== lastSavedQR) captureAndScan(qrVal);
+                } else {
+                    stableCount = 0;
+                }
+            }
+        } catch (e) { /* keep looping */ }
+    }
+    scanTimer = setTimeout(loopScan, 300);
+}
+
+// Grab a full-res still and run the existing scanImage() pipeline on it.
+// triggerQR is the live-detected QR that fired the capture (null for a manual tap);
+// it becomes the dedupe key so the same card held in frame won't be added twice.
+async function captureAndScan(triggerQR) {
+    if (busy || !scanning) return;
+    busy = true;
+    setStatus('Card detected — reading ICCID, PIN and PUK…');
+    try {
+        const grab = frameToCanvas(grabCanvas, 0);
+        if (!grab) { busy = false; return; }
+        const entry = await scanImage(grab);
+        historyData.unshift(entry);
+        renderTable();
+
+        if (triggerQR) lastSavedQR = triggerQR;
+        else if (entry.lpa && entry.lpa !== 'QR Not Found') lastSavedQR = entry.lpa;
+
+        flashOK();
+        const issues = [];
+        if (entry.iccid === 'Not Found') issues.push('ICCID');
+        if (entry.pin === 'Not Found')   issues.push('PIN');
+        if (entry.puk === 'Not Found')   issues.push('PUK');
+        if (entry.lpa === 'QR Not Found') issues.push('QR');
+        if (issues.length) setStatus('Added — but double-check ' + issues.join(', ') + '. Hold the card flatter/steadier for a re-read, or tap a field to edit.');
+        else setStatus('Added \u2713  Show the next card.');
+
+        if (aiToggle.checked) verifyRow(entry);
+    } catch (err) {
+        setStatus('Read failed: ' + (err && err.message ? err.message : err) + '. Try again.', true);
+    } finally {
+        busy = false;
+    }
+}
+
+function flashOK() {
+    overlay.classList.add('flash');
+    setTimeout(() => overlay.classList.remove('flash'), 350);
+}
+
+startBtn.addEventListener('click', startCamera);
+stopBtn.addEventListener('click', stopCamera);
+captureBtn.addEventListener('click', () => captureAndScan(null));   // manual capture ignores dedupe
+torchBtn.addEventListener('click', toggleTorch);
+window.addEventListener('pagehide', stopCamera);
+document.addEventListener('visibilitychange', () => { if (document.hidden && stream) stopCamera(); });
+
+/* ============================================================================
+   ZXing decoders (QR + Code128). Two single-format readers so a card that has
+   BOTH a QR and a barcode in frame can't return the wrong symbol: the QR reader
+   only ever returns QR, the barcode reader only ever returns Code128.
+   ========================================================================== */
+let _qrReader = null, _barReader = null, _readersInit = false;
+function makeReader(formats) {
+    if (typeof ZXing === 'undefined') return null;
+    try {
+        const hints = new Map();
+        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+        return new ZXing.BrowserMultiFormatReader(hints);
+    } catch (e) { console.warn('ZXing reader init failed:', e); return null; }
+}
+function initReaders() {
+    if (_readersInit) return;
+    _readersInit = true;
+    if (typeof ZXing === 'undefined') return;
+    _qrReader  = makeReader([ZXing.BarcodeFormat.QR_CODE]);
+    _barReader = makeReader([ZXing.BarcodeFormat.CODE_128]);
+}
+function zxDecode(reader, canvas) {
+    if (!reader) return null;
+    try {
+        const res = reader.decodeFromCanvas(canvas);
+        if (!res) return null;
+        return res.getText ? res.getText() : (res.text || null);
+    } catch (e) { return null; }   // ZXing throws NotFoundException when nothing decodes
+}
+
+/* Small canvas helpers used by the barcode passes. */
+function cropBand(img, y0, y1) {
+    const sy = Math.round(img.height * y0), ey = Math.round(img.height * y1);
+    const sh = ey - sy; if (sh < 10) return null;
+    const sw = img.width;
+    const scale = Math.min(3, Math.max(1, 1800 / sw));
+    const c = document.createElement('canvas');
+    c.width = Math.round(sw * scale); c.height = Math.round(sh * scale);
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, sy, sw, sh, 0, 0, c.width, c.height);
+    return c;
+}
+function grayOtsuCanvas(src) {
+    const w = src.width, h = src.height;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d'); ctx.drawImage(src, 0, 0);
+    const id = ctx.getImageData(0, 0, w, h), d = id.data;
+    const g = new Uint8ClampedArray(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) g[p] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    const t = otsu(g);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) { const v = g[p] > t ? 255 : 0; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
+    ctx.putImageData(id, 0, 0); return c;
+}
+function graySharpCanvas(src) {
+    const w = src.width, h = src.height;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d'); ctx.drawImage(src, 0, 0);
+    const id = ctx.getImageData(0, 0, w, h), d = id.data;
+    let g = new Uint8ClampedArray(w * h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) g[p] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    g = sharpenGray(g, w, h);
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) { const v = g[p]; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
+    ctx.putImageData(id, 0, 0); return c;
+}
+
+// Read the ICCID straight off the Code128 barcode. Deterministic and Luhn-checkable,
+// so when it succeeds it's authoritative and replaces whatever OCR guessed. Tries the
+// full frame first (fast, usually enough), then cropped + grayscale/Otsu/sharpened
+// bottom-band variants for photos where the barcode is small or low-contrast.
+async function iccidFromBarcode(img) {
+    initReaders();
+    if (!_barReader) return null;
+
+    const cands = [];
+    const longSide = Math.min(3000, Math.max(img.width, img.height));
+    cands.push(fitCanvas(img, longSide));
+    for (const [y0, y1] of [[0.55, 1.0], [0.60, 0.92], [0.68, 0.90]]) {
+        const band = cropBand(img, y0, y1);
+        if (!band) continue;
+        cands.push(band);
+        cands.push(graySharpCanvas(band));
+        cands.push(grayOtsuCanvas(band));
+    }
+
+    // Pass 1: require a Luhn-valid 89… number (rejects any stray misread).
+    for (const c of cands) {
+        const t = zxDecode(_barReader, c);
+        if (t) { const digits = t.replace(/\D/g, ''); if (/^89\d{16,18}$/.test(digits) && luhnValid(digits)) return digits; }
+    }
+    // Pass 2: accept a well-formed 89… even if Luhn fails (barcode symbology already
+    // has its own check digit, so a clean decode is trustworthy on its own).
+    for (const c of cands) {
+        const t = zxDecode(_barReader, c);
+        if (t) { const digits = t.replace(/\D/g, ''); if (/^89\d{16,18}$/.test(digits)) return digits; }
+    }
+    return null;
+}
+
+// From a noisy OCR digit blob (bars may add junk), pick the best ICCID: the first
+// 89-prefixed window of length 19/20/18 that passes Luhn. This is what trims a stray
+// trailing digit — e.g. OCR "...73352" yields the Luhn-valid "...7335". If nothing
+// passes Luhn, return the first plausible 18–20 digit 89… run as-is (flagged CHECK in UI).
+function bestIccidFromDigits(digits) {
+    if (!digits) return null;
+    let idx = digits.indexOf('89');
+    while (idx !== -1) {
+        for (const len of [19, 20, 18]) {
+            if (idx + len <= digits.length) {
+                const cand = digits.substr(idx, len);
+                if (/^89\d+$/.test(cand) && luhnValid(cand)) return cand;
+            }
         }
-        return;
+        idx = digits.indexOf('89', idx + 1);
     }
-
-    addToQueue(files[0]);
-});
-
-function addToQueue(file) {
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-        galleryQueue.push({ file, thumb: ev.target.result });
-        renderQueue();
-        setStatus(galleryQueue.length + ' photo(s) queued — tap "Choose from gallery" to add more, or "Scan queued photos" to process them.');
-    };
-    reader.readAsDataURL(file);
+    const m = digits.match(/89\d{16,18}/);
+    return m ? m[0] : null;
 }
 
-function clearQueue() {
-    galleryQueue = [];
-    renderQueue();
-}
-
-function renderQueue() {
-    if (!galleryQueue.length) {
-        queueBar.style.display = 'none';
-        return;
+// Printed-digit ICCID fallback: OCR the human-readable line under the Code128 barcode
+// when the barcode itself won't decode. Uses the digit-only whitelist worker on a
+// cropped/upscaled barcode band (raw, Otsu, and sharpened variants) and Luhn-filters
+// the result. Slower than the barcode read, so it only runs when the barcode fails.
+async function iccidFromPrintedText(img) {
+    const worker = await getDigitWorker();
+    if (!worker) return null;
+    let fallback = null;
+    for (const [y0, y1] of [[0.60, 0.90], [0.64, 0.92], [0.55, 0.95], [0.68, 0.88]]) {
+        const band = cropBand(img, y0, y1);
+        if (!band) continue;
+        for (const cv of [band, grayOtsuCanvas(band), graySharpCanvas(band)]) {
+            let text = '';
+            try { const r = await worker.recognize(cv); text = (r && r.data && r.data.text) || ''; }
+            catch (e) { continue; }
+            const digits = text.replace(/\D/g, '');
+            const best = bestIccidFromDigits(digits);
+            if (best) {
+                if (luhnValid(best)) return best;   // clean, done
+                if (!fallback) fallback = best;      // remember a non-Luhn candidate as last resort
+            }
+        }
     }
-    queueBar.style.display = 'block';
-    queueCount.textContent = galleryQueue.length + ' photo(s) queued to scan';
-    queueThumbs.innerHTML = galleryQueue.map(q => `<img src="${q.thumb}" alt="queued photo">`).join('');
+    return fallback;
 }
 
-scanQueueBtn.addEventListener('click', () => {
-    if (!galleryQueue.length) return;
-    const files = galleryQueue.map(q => q.file);
-    clearQueue();
-    runBatch(files);
-});
-
-clearQueueBtn.addEventListener('click', () => {
-    clearQueue();
-    setStatus('Queue cleared.');
-});
+/* ============================================================================
+   Digit-only OCR worker for the PIN/PUK box. A whitelist of just digits+space
+   means Tesseract can't invent letters or mangle the label, so the box reads as
+   clean numbers even when full-page OCR corrupted the line. Lazily created and
+   cached (also faster than spinning a worker per scan).
+   ========================================================================== */
+let _digitWorker = null, _digitWorkerPromise = null;
+async function getDigitWorker() {
+    if (_digitWorker) return _digitWorker;
+    if (typeof Tesseract === 'undefined' || typeof Tesseract.createWorker !== 'function') return null;
+    if (!_digitWorkerPromise) {
+        _digitWorkerPromise = (async () => {
+            const w = await Tesseract.createWorker('eng');
+            await w.setParameters({ tessedit_char_whitelist: '0123456789 ' });
+            _digitWorker = w;
+            return w;
+        })();
+    }
+    try { return await _digitWorkerPromise; }
+    catch (e) { console.warn('digit worker init failed:', e); _digitWorkerPromise = null; return null; }
+}
+async function ocrDigitsWhitelist(cropCanvas) {
+    const w = await getDigitWorker();
+    if (!w) return '';
+    const maxSide = Math.max(cropCanvas.width, cropCanvas.height);
+    const scale = Math.max(1, Math.min(4, 900 / maxSide));
+    const up = document.createElement('canvas');
+    up.width = Math.max(1, Math.round(cropCanvas.width * scale));
+    up.height = Math.max(1, Math.round(cropCanvas.height * scale));
+    const ctx = up.getContext('2d');
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(cropCanvas, 0, 0, up.width, up.height);
+    const { data: { text } } = await w.recognize(up);
+    return text || '';
+}
+function parsePinPukFromDigits(text) {
+    const lines = (text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    let pin = null, puk = null;
+    for (const l of lines) {
+        const runs = l.match(/\d{3,}/g) || [];
+        for (const r of runs) {
+            if (!puk && r.length === 8) puk = r;
+            else if (!pin && r.length === 4) pin = r;
+        }
+    }
+    return { pin, puk };
+}
+// Crop that should contain the PIN/PUK box: the printed outline box if we can find
+// it, otherwise a fixed top-left region where Vodafone IT always prints it. We avoid
+// detectBrightBoxCrop here because that targets filled bright regions and could grab
+// the QR sticker instead of the hollow PIN/PUK frame.
+function pinPukBoxCrop(img) {
+    return detectOutlineBoxCrop(img) || heuristicPinBox(img);
+}
+function heuristicPinBox(img) {
+    const sx = Math.round(img.width * 0.02), sy = Math.round(img.height * 0.26);
+    const ex = Math.round(img.width * 0.50), ey = Math.round(img.height * 0.54);
+    if (ex - sx < 10 || ey - sy < 10) return null;
+    const c = document.createElement('canvas');
+    c.width = ex - sx; c.height = ey - sy;
+    c.getContext('2d').drawImage(img, sx, sy, ex - sx, ey - sy, 0, 0, c.width, c.height);
+    return c;
+}
 
 async function scanImage(img) {
     const isLowRes = Math.max(img.width, img.height) < LOWRES_THRESHOLD;
@@ -270,12 +578,39 @@ async function scanImage(img) {
 
     let iccid = extractIccid(text);
     let iccidLuhn = iccid !== 'Not Found' ? luhnValid(iccid) : null;
+    let iccidFromBc = false;
     let pin = extractField(text, 'PIN', 4);
     let puk = extractField(text, 'PUK', 8);
     let rawText = text;
 
+    // Authoritative ICCID from the Code128 barcode. Runs on every scan (not just on
+    // failure) because a clean barcode read beats even a Luhn-passing OCR guess — this
+    // is the fix for cards where the printed ICCID line OCR'd to "Not Found".
+    try {
+        setStatus('Reading ICCID barcode...');
+        const bcIccid = await iccidFromBarcode(img);
+        if (bcIccid) {
+            iccid = bcIccid;
+            iccidLuhn = luhnValid(bcIccid);
+            iccidFromBc = true;
+            rawText += '\n----- barcode ICCID -----\n' + bcIccid;
+        } else {
+            // Barcode wouldn't decode — fall back to OCR of the printed digit line
+            // underneath it. Keeps only a Luhn-valid 89… number, so a stray extra digit
+            // read off the bars gets trimmed to the correct 19/20-digit ICCID.
+            setStatus('Barcode unreadable — reading printed ICCID digits...');
+            const ptIccid = await iccidFromPrintedText(img);
+            if (ptIccid) {
+                iccid = ptIccid;
+                iccidLuhn = luhnValid(ptIccid);
+                rawText += '\n----- printed ICCID line (OCR) -----\n' + ptIccid;
+            }
+        }
+    } catch (e) { console.warn('barcode ICCID skipped:', e); }
+
     function considerIccid(candidate) {
         if (candidate === 'Not Found') return;
+        if (iccidFromBc) return;  // barcode wins over any OCR candidate
         const candidateLuhn = luhnValid(candidate);
         if (candidateLuhn === true || iccid === 'Not Found') {
             iccid = candidate;
@@ -380,11 +715,32 @@ async function scanImage(img) {
         }
     }
 
+    // Last-resort PIN/PUK recovery: digit-only OCR on the isolated box. Because the
+    // whitelist forbids letters, the label ("PIN"/"PUK") disappears and the numbers read
+    // cleanly, so we parse positionally (4-digit run = PIN, 8-digit run = PUK). This is
+    // what recovers a PUK that every label-based pass missed to a mangled label/line.
+    if (pin === 'Not Found' || puk === 'Not Found') {
+        const boxForDigits = pinPukBoxCrop(img);
+        if (boxForDigits) {
+            try {
+                setStatus('Retrying PIN/PUK with digit-only OCR...');
+                const digitsText = await ocrDigitsWhitelist(boxForDigits);
+                if (digitsText) {
+                    rawText += '\n----- digit-whitelist box pass -----\n' + digitsText;
+                    const pp = parsePinPukFromDigits(digitsText);
+                    if (pin === 'Not Found' && pp.pin) pin = pp.pin;
+                    if (puk === 'Not Found' && pp.puk) puk = pp.puk;
+                }
+            } catch (e) { console.warn('digit-whitelist pass skipped:', e); }
+        }
+    }
+
     return {
         id: nextId++,
         time: new Date().toLocaleTimeString(),
         iccid,
         iccidLuhn,
+        iccidFromBc,
         pin,
         puk,
         lpa: qr.value || 'QR Not Found',
@@ -396,78 +752,6 @@ async function scanImage(img) {
         rawText,
         showRaw: false
     };
-}
-
-processBtn.addEventListener('click', async () => {
-    if (!currentImage) return;
-    if (typeof Tesseract === 'undefined' || typeof jsQR === 'undefined') {
-        setStatus('OCR/QR library not loaded — see message above.', true);
-        return;
-    }
-    processBtn.disabled = true;
-    setStatus('Loading image...');
-
-    try {
-        const img = await loadImage(currentImage);
-        const entry = await scanImage(img);
-        historyData.unshift(entry);
-        renderTable();
-
-        preview.style.display = 'none';
-        cameraInput.value = '';
-        galleryInput.value = '';
-        currentImage = null;
-        processBtn.disabled = true;
-        if (entry.blurry) setStatus('Record added — photo looks blurry, results may be unreliable. Consider retaking with a steadier hand or better light.');
-        else if (entry.lowRes) setStatus('Record added — source photo was low resolution, please double-check the fields.');
-        else setStatus('Record added.');
-
-        if (aiToggle.checked) verifyRow(entry);
-    } catch (err) {
-        setStatus('Scan failed: ' + (err && err.message ? err.message : String(err)), true);
-        processBtn.disabled = false;
-    }
-});
-
-async function runBatch(files) {
-    if (typeof Tesseract === 'undefined' || typeof jsQR === 'undefined') {
-        setStatus('OCR/QR library not loaded — see message above.', true);
-        return;
-    }
-    cameraBtn.disabled = true;
-    galleryBtn.disabled = true;
-    processBtn.disabled = true;
-    scanQueueBtn.disabled = true;
-
-    let ok = 0, flagged = 0;
-    const failedNames = [];
-    for (let i = 0; i < files.length; i++) {
-        setStatus(`Processing photo ${i + 1} of ${files.length}...`);
-        try {
-            const dataUrl = await readFileAsDataURL(files[i]);
-            const img = await loadImage(dataUrl);
-            const entry = await scanImage(img);
-            historyData.unshift(entry);
-            renderTable();
-            if (entry.blurry || entry.pin === 'Not Found' || entry.puk === 'Not Found' || entry.iccidLuhn === false) flagged++;
-            ok++;
-            if (aiToggle.checked) verifyRow(entry);
-        } catch (err) {
-            failedNames.push(files[i].name || `photo ${i + 1}`);
-            console.warn('Batch item failed (' + files[i].name + '):', err);
-        }
-    }
-
-    galleryInput.value = '';
-    cameraBtn.disabled = false;
-    galleryBtn.disabled = false;
-    processBtn.disabled = true;
-    scanQueueBtn.disabled = false;
-
-    let msg = `Batch done — added ${ok} of ${files.length} photo(s).`;
-    if (failedNames.length) msg += ` Failed: ${failedNames.join(', ')}.`;
-    if (flagged) msg += ` ${flagged} need a second look (blurry, a field missing, or a checksum mismatch) — check the tags in the table.`;
-    setStatus(msg);
 }
 
 async function callVision(dataUrl) {
@@ -486,7 +770,9 @@ async function verifyRow(entry) {
     if (!entry.img) return;
     try {
         const r = await callVision(entry.img);
-        if (r.iccid) { entry.iccid = r.iccid; entry.iccidLuhn = /^\d+$/.test(r.iccid) ? luhnValid(r.iccid) : null; }
+        // Don't let AI vision overwrite an ICCID we read from the barcode — the barcode
+        // is the more reliable source. AI may still fill a barcode-less ICCID.
+        if (r.iccid && !entry.iccidFromBc) { entry.iccid = r.iccid; entry.iccidLuhn = /^\d+$/.test(r.iccid) ? luhnValid(r.iccid) : null; }
         if (r.pin)   { entry.pin = r.pin; }
         if (r.puk)   { entry.puk = r.puk; }
         entry.aiVerified = true;
@@ -509,6 +795,7 @@ async function saveToSheet() {
             time: r.time,
             iccid: r.iccid === 'Not Found' ? '' : r.iccid,
             iccidValid: r.iccidLuhn === true ? 'OK' : (r.iccidLuhn === false ? 'CHECK' : ''),
+            iccidSource: r.iccidFromBc ? 'BARCODE' : 'OCR',
             pin: r.pin === 'Not Found' ? '' : r.pin,
             puk: r.puk === 'Not Found' ? '' : r.puk,
             lpa: r.lpa === 'QR Not Found' ? '' : r.lpa,
@@ -633,6 +920,11 @@ function detectQR(img, prepCanvas) {
     if (v) return { value: v, via: 'jsQR/raw' };
     v = decodeJsQR(rawCanvas, true);
     if (v) return { value: v, via: 'jsQR/threshold' };
+    // ZXing fallback — handles the low-contrast matte-red QR codes jsQR chokes on.
+    // QR-only reader, so the barcode in the same frame can't be returned instead.
+    initReaders();
+    v = zxDecode(_qrReader, rawCanvas) || zxDecode(_qrReader, prepCanvas);
+    if (v) return { value: v, via: 'zxing' };
     return { value: null, via: null };
 }
 
@@ -943,7 +1235,9 @@ function normalizeDigitsOCR(s) {
         .replace(/[bB]/g, '8')
         .replace(/[gG]/g, '6')
         .replace(/[zZ]/g, '2')
-        .replace(/[qQ]/g, '0');
+        .replace(/[qQ]/g, '0')
+        .replace(/[aA]/g, '4')
+        .replace(/[tT]/g, '7');
 }
 
 function extractField(text, label, count) {
@@ -999,8 +1293,8 @@ function extractField(text, label, count) {
 // when the digit run itself was read correctly, which is why this fallback kept
 // missing cards that visibly had the numbers in raw text. Spaces/dashes inside the run
 // (e.g. "1234 5678" style spacing) are still tolerated and stripped. Letter/digit
-// confusions (O/0, l/1, S/5, B/8, G/6, Z/2, Q/0) are normalized on each candidate line
-// before pulling the run, same as extractField.
+// confusions (O/0, l/1, S/5, B/8, G/6, Z/2, Q/0, A/4, T/7) are normalized on each
+// candidate line before pulling the run, same as extractField.
 // When the "PIN" label itself gets OCR-corrupted (e.g. read as "PN" with the I dropped,
 // or "P1N", "PlN") but the "PUK" label right below it stays intact — which we've seen
 // happen in practice — extractField's label regex never finds the PIN line at all, and
@@ -1067,7 +1361,11 @@ function extractPositionalPinPuk(text, iccid) {
 }
 
 function isActivationCodeLine(line) {
-    return /LPA\s*[:.]?\s*1\$/i.test(line) || /SM-?DP/i.test(line) || /\$[A-Z0-9]{4,}/.test(line);
+    return /LPA\s*[:.]?\s*1\s*\$/i.test(line) ||
+           /SM-?DP/i.test(line) ||
+           /ondemandconnectivity/i.test(line) ||          // real host on these Vodafone IT eSIMs
+           /\$[A-Z0-9]{4,}/.test(line) ||
+           /\$[a-z0-9.\-]{6,}\$/i.test(line);              // generic "$sm-dp-host$" segment
 }
 
 function luhnValid(num) {
@@ -1098,7 +1396,7 @@ function renderTable() {
         const row = `
         <tr data-id="${item.id}">
             <td>${item.time}${item.aiVerified ? '<span class="ai-tag" title="Verified by AI">AI</span>' : ''}${item.saved ? '<span class="saved-tag" title="Saved to sheet">saved</span>' : ''}${item.lowRes ? '<span class="lowres-tag" title="Source photo was low resolution — verify fields">LOW RES</span>' : ''}${item.blurry ? '<span class="blurry-tag" title="Photo looks blurry — verify fields, consider retaking">BLURRY</span>' : ''}</td>
-            <td><span class="edit${item.iccidLuhn === false ? ' bad' : ''}" contenteditable="true" data-field="iccid">${escapeHtml(item.iccid)}</span><span class="badge">${luhnBadge(item.iccidLuhn)}</span></td>
+            <td><span class="edit${item.iccidLuhn === false ? ' bad' : ''}" contenteditable="true" data-field="iccid">${escapeHtml(item.iccid)}</span><span class="badge">${luhnBadge(item.iccidLuhn)}</span>${item.iccidFromBc ? '<span class="bc-tag" title="Read from the Code128 barcode">BARCODE</span>' : ''}</td>
             <td><span class="edit" contenteditable="true" data-field="pin">${escapeHtml(item.pin)}</span></td>
             <td><span class="edit" contenteditable="true" data-field="puk">${escapeHtml(item.puk)}</span></td>
             <td class="lpa-text"><span class="edit" contenteditable="true" data-field="lpa">${escapeHtml(item.lpa)}</span></td>
@@ -1121,10 +1419,13 @@ historyBody.addEventListener('focusout', (e) => {
     const field = span.dataset.field;
     entry[field] = span.textContent.trim();
     if (field === 'iccid') {
+        entry.iccidFromBc = false;   // a hand-edited ICCID is no longer the barcode value
         entry.iccidLuhn = /^\d+$/.test(entry.iccid) ? luhnValid(entry.iccid) : null;
         span.classList.toggle('bad', entry.iccidLuhn === false);
         const badge = tr.querySelector('.badge');
         if (badge) badge.innerHTML = luhnBadge(entry.iccidLuhn);
+        const bcTag = tr.querySelector('.bc-tag');
+        if (bcTag) bcTag.remove();
     }
 });
 
@@ -1144,10 +1445,11 @@ historyBody.addEventListener('click', (e) => {
 
 downloadBtn.addEventListener('click', () => {
     if (!historyData.length) { setStatus('Nothing to export yet.', true); return; }
-    let csv = 'Time,ICCID,ICCID_Valid,PIN,PUK,LPA Code,AI_Verified,Low_Res_Source\n';
+    let csv = 'Time,ICCID,ICCID_Valid,ICCID_Source,PIN,PUK,LPA Code,AI_Verified,Low_Res_Source\n';
     historyData.forEach(row => {
         const valid = row.iccidLuhn === true ? 'OK' : (row.iccidLuhn === false ? 'CHECK' : '');
-        const fields = [row.time, "'" + row.iccid, valid, row.pin, row.puk, row.lpa, row.aiVerified ? 'YES' : 'NO', row.lowRes ? 'YES' : 'NO'];
+        const src = row.iccidFromBc ? 'BARCODE' : 'OCR';
+        const fields = [row.time, "'" + row.iccid, valid, src, row.pin, row.puk, row.lpa, row.aiVerified ? 'YES' : 'NO', row.lowRes ? 'YES' : 'NO'];
         csv += fields.map(f => `"${String(f).replace(/"/g, '""')}"`).join(',') + '\n';
     });
     const blob = new Blob([csv], { type: 'text/csv' });

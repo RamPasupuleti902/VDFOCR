@@ -79,6 +79,7 @@
         .chips { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; }
         .chip { font-size: 12px; font-weight: 700; color: #fff; background: rgba(15,23,42,.55); border-radius: 20px; padding: 4px 10px; }
         .chip.chip-on { background: var(--ok); }
+        .rowthumb { width: 46px; height: 46px; object-fit: cover; border-radius: 6px; border: 1px solid #cbd5e1; display: block; margin-bottom: 4px; cursor: zoom-in; }
         .cam-controls { display: flex; gap: 10px; margin: 16px 0 0; flex-wrap: wrap; }
         .cam-controls button { flex: 1; min-width: 120px; padding: 14px; border-radius: 9px; font-weight: 600; font-size: 15px; cursor: pointer; }
         #stopBtn, #captureBtn, #torchBtn { background: #fff; color: var(--ink); border: 1px solid #cbd5e1; }
@@ -182,6 +183,7 @@ window.addEventListener('load', () => {
    is created — frames stay in memory on the device.
    ========================================================================== */
 let stream = null;          // active MediaStream
+const AUTO_CAPTURE = false; // hands-free auto-capture on stable QR (off = tap Capture)
 let videoTrack = null;      // its video track (for torch)
 let scanning = false;       // camera live + loop running
 let busy = false;           // a full OCR capture is in progress (pauses detection)
@@ -293,8 +295,10 @@ function loopScan() {
                 if (qrVal) {
                     if (qrVal === stableQR) stableCount++;
                     else { stableQR = qrVal; stableCount = 1; }
-                    // 2 consecutive matching reads = steady enough to capture; dedupe on the card held.
-                    if (stableCount >= 2 && qrVal !== lastSavedQR) captureAndScan(qrVal);
+                    // Auto-capture is OFF by default — it was the source of wrong-card grabs.
+                    // Aim using the chips, then tap "Capture now". Flip AUTO_CAPTURE to true
+                    // for hands-free scanning (each auto-capture also turns the camera off).
+                    if (AUTO_CAPTURE && stableCount >= 3 && qrVal !== lastSavedQR) captureAndScan(qrVal);
                 } else {
                     stableCount = 0;
                 }
@@ -307,13 +311,18 @@ function loopScan() {
 // Grab a full-res still and run the existing scanImage() pipeline on it.
 // triggerQR is the live-detected QR that fired the capture (null for a manual tap);
 // it becomes the dedupe key so the same card held in frame won't be added twice.
+// Grab a full-res still, then TURN THE CAMERA OFF, then run scanImage() on the frozen
+// frame. Capture ends the live session — the camera does not stay on after a capture.
+// triggerQR is the live-detected QR that fired an auto-capture (null for a manual tap).
 async function captureAndScan(triggerQR) {
-    if (busy || !scanning) return;
+    if (busy) return;
+    // Freeze the exact frame BEFORE stopping the camera, so the read uses this still.
+    const grab = frameToCanvas(grabCanvas, 0);
+    if (!grab) { setStatus('No camera frame yet — wait for the preview, then tap Capture.', true); return; }
     busy = true;
-    setStatus('Card detected — reading ICCID, PIN and PUK…');
+    stopCamera();                 // <-- camera off immediately after capture
+    setStatus('Captured — reading ICCID, PIN and PUK…');
     try {
-        const grab = frameToCanvas(grabCanvas, 0);
-        if (!grab) { busy = false; return; }
         const entry = await scanImage(grab);
         historyData.unshift(entry);
         renderTable();
@@ -321,18 +330,17 @@ async function captureAndScan(triggerQR) {
         if (triggerQR) lastSavedQR = triggerQR;
         else if (entry.lpa && entry.lpa !== 'QR Not Found') lastSavedQR = entry.lpa;
 
-        flashOK();
         const issues = [];
         if (entry.iccid === 'Not Found') issues.push('ICCID');
         if (entry.pin === 'Not Found')   issues.push('PIN');
         if (entry.puk === 'Not Found')   issues.push('PUK');
         if (entry.lpa === 'QR Not Found') issues.push('QR');
-        if (issues.length) setStatus('Added — but double-check ' + issues.join(', ') + '. Hold the card flatter/steadier for a re-read, or tap a field to edit.');
-        else setStatus('Added \u2713  Show the next card.');
+        if (issues.length) setStatus('Added — but check ' + issues.join(', ') + ' (see the thumbnail). Tap Start camera to re-scan, or tap a field to edit.');
+        else setStatus('Added \u2713 — tap Start camera for the next card.');
 
         if (aiToggle.checked) verifyRow(entry);
     } catch (err) {
-        setStatus('Read failed: ' + (err && err.message ? err.message : err) + '. Try again.', true);
+        setStatus('Read failed: ' + (err && err.message ? err.message : err) + '. Tap Start camera and try again.', true);
     } finally {
         busy = false;
     }
@@ -1395,7 +1403,7 @@ function renderTable() {
     historyBody.innerHTML = historyData.map(item => {
         const row = `
         <tr data-id="${item.id}">
-            <td>${item.time}${item.aiVerified ? '<span class="ai-tag" title="Verified by AI">AI</span>' : ''}${item.saved ? '<span class="saved-tag" title="Saved to sheet">saved</span>' : ''}${item.lowRes ? '<span class="lowres-tag" title="Source photo was low resolution — verify fields">LOW RES</span>' : ''}${item.blurry ? '<span class="blurry-tag" title="Photo looks blurry — verify fields, consider retaking">BLURRY</span>' : ''}</td>
+            <td>${item.img ? '<img class="rowthumb" src="' + item.img + '" alt="captured frame" title="The frame this row was read from — tap to open">' : ''}${item.time}${item.aiVerified ? '<span class="ai-tag" title="Verified by AI">AI</span>' : ''}${item.saved ? '<span class="saved-tag" title="Saved to sheet">saved</span>' : ''}${item.lowRes ? '<span class="lowres-tag" title="Source photo was low resolution — verify fields">LOW RES</span>' : ''}${item.blurry ? '<span class="blurry-tag" title="Photo looks blurry — verify fields, consider retaking">BLURRY</span>' : ''}</td>
             <td><span class="edit${item.iccidLuhn === false ? ' bad' : ''}" contenteditable="true" data-field="iccid">${escapeHtml(item.iccid)}</span><span class="badge">${luhnBadge(item.iccidLuhn)}</span>${item.iccidFromBc ? '<span class="bc-tag" title="Read from the Code128 barcode">BARCODE</span>' : ''}</td>
             <td><span class="edit" contenteditable="true" data-field="pin">${escapeHtml(item.pin)}</span></td>
             <td><span class="edit" contenteditable="true" data-field="puk">${escapeHtml(item.puk)}</span></td>
@@ -1434,6 +1442,8 @@ historyBody.addEventListener('keydown', (e) => {
 });
 
 historyBody.addEventListener('click', (e) => {
+    const thumb = e.target.closest('.rowthumb');
+    if (thumb && thumb.src) { const w = window.open(); if (w) w.document.write('<img src="' + thumb.src + '" style="max-width:100%">'); return; }
     const del = e.target.closest('[data-del]');
     if (del) { historyData = historyData.filter(x => x.id !== +del.dataset.del); renderTable(); return; }
     const raw = e.target.closest('[data-raw]');

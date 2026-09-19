@@ -8,16 +8,17 @@
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>eSIM Card Scanner - ICCID / LPA / PIN / PUK</title>
+    <title>eSIM Card Scanner</title>
 
-    <!-- QR Scanner -->
+    <!-- QR -->
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 
     <!-- OCR -->
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 
-    <!-- Barcode / QR -->
+    <!-- Barcode -->
     <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+
 
     <style>
 
@@ -27,9 +28,8 @@
 
         body {
             margin: 0;
-            padding: 0;
             background: #f3f6fa;
-            font-family: Arial, Helvetica, sans-serif;
+            font-family: Arial, sans-serif;
             color: #172033;
         }
 
@@ -42,53 +42,57 @@
         .header {
             background: #1769d2;
             color: white;
-            padding: 25px 30px;
+            padding: 25px;
             border-radius: 12px 12px 0 0;
         }
 
         .header h1 {
-            margin: 0 0 8px 0;
-            font-size: 30px;
+            margin: 0 0 8px;
         }
 
         .header p {
             margin: 0;
-            font-size: 15px;
-            opacity: 0.95;
         }
 
         .card {
             background: white;
             padding: 25px;
             border-radius: 0 0 12px 12px;
-            box-shadow: 0 5px 25px rgba(0,0,0,0.08);
+            box-shadow: 0 5px 25px rgba(0,0,0,.08);
         }
 
         .buttons {
             display: flex;
             flex-wrap: wrap;
-            gap: 12px;
+            gap: 10px;
             margin-bottom: 20px;
         }
 
+        /*
+         * IMPORTANT:
+         * Upload button is a LABEL.
+         * It works without JavaScript.
+         */
+
+        .upload-button,
+        .camera-button,
         button {
-            border: none;
+            display: inline-block;
+            padding: 13px 20px;
+            border: 0;
             border-radius: 7px;
-            padding: 13px 22px;
+            background: #1769d2;
+            color: white;
             font-size: 15px;
             font-weight: bold;
             cursor: pointer;
-            background: #1769d2;
-            color: white;
+            text-decoration: none;
         }
 
+        .upload-button:hover,
+        .camera-button:hover,
         button:hover {
-            opacity: 0.9;
-        }
-
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
+            opacity: .88;
         }
 
         button.secondary {
@@ -99,11 +103,16 @@
             background: #d93025;
         }
 
+        button:disabled {
+            opacity: .5;
+            cursor: not-allowed;
+        }
+
         /*
-         * IMPORTANT:
-         * These inputs are hidden, but the buttons above
-         * open them using JavaScript.
+         * Native file inputs are hidden.
+         * LABEL opens them directly.
          */
+
         #fileInput,
         #cameraInput {
             display: none;
@@ -119,18 +128,40 @@
             font-weight: bold;
         }
 
-        .section-title {
-            font-size: 24px;
+        .summary {
+            display: grid;
+            grid-template-columns:
+                repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .summary-box {
+            background: #f7f9fc;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 18px;
+        }
+
+        .summary-label {
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+
+        .summary-number {
+            font-size: 25px;
+            font-weight: bold;
+        }
+
+        h2 {
             margin-top: 30px;
-            margin-bottom: 15px;
         }
 
         .preview-grid {
             display: grid;
-            grid-template-columns: repeat(
-                auto-fit,
-                minmax(300px, 1fr)
-            );
+            grid-template-columns:
+                repeat(auto-fit, minmax(300px, 1fr));
             gap: 20px;
         }
 
@@ -143,111 +174,63 @@
 
         .preview-card h3 {
             margin-top: 0;
-            font-size: 16px;
-            word-break: break-all;
+            word-break: break-word;
         }
 
         .preview-card img {
-            display: block;
             width: 100%;
-            max-height: 600px;
+            max-height: 650px;
             object-fit: contain;
             background: #eee;
             border-radius: 6px;
         }
 
         .table-wrapper {
-            width: 100%;
             overflow-x: auto;
         }
 
         table {
             width: 100%;
+            min-width: 950px;
             border-collapse: collapse;
-            min-width: 900px;
         }
 
         th {
             background: #1769d2;
             color: white;
+            padding: 13px;
             text-align: left;
-            padding: 14px;
-            font-size: 16px;
         }
 
         td {
-            padding: 14px;
             border: 1px solid #ddd;
+            padding: 13px;
             vertical-align: top;
             word-break: break-word;
         }
 
-        tbody tr:nth-child(even) {
+        tr:nth-child(even) {
             background: #f8f8f8;
         }
 
-        .value {
-            font-weight: bold;
-            color: #111;
-        }
-
-        .success {
-            color: #188038;
-            font-weight: bold;
-        }
-
-        .missing {
-            color: #d93025;
-            font-weight: bold;
-        }
-
         .ocr-box {
-            width: 100%;
-            min-height: 250px;
             background: #fafafa;
             border: 1px solid #ddd;
             border-radius: 8px;
-            padding: 18px;
+            padding: 15px;
+            min-height: 250px;
             white-space: pre-wrap;
-            overflow-x: auto;
             font-family: Consolas, monospace;
-            font-size: 14px;
-            line-height: 1.5;
+            overflow-x: auto;
         }
 
         .info {
+            margin-top: 25px;
+            padding: 15px;
             background: #fff8e1;
             border: 1px solid #ffe082;
-            padding: 15px;
             border-radius: 8px;
-            margin-top: 20px;
-            line-height: 1.5;
-        }
-
-        .result-summary {
-            display: grid;
-            grid-template-columns:
-                repeat(auto-fit, minmax(180px, 1fr));
-            gap: 15px;
-            margin: 20px 0;
-        }
-
-        .summary-box {
-            background: #f7f9fc;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 18px;
-        }
-
-        .summary-box .label {
-            font-size: 13px;
-            color: #666;
-            margin-bottom: 8px;
-        }
-
-        .summary-box .number {
-            font-size: 24px;
-            font-weight: bold;
+            line-height: 1.6;
         }
 
         @media (max-width: 700px) {
@@ -259,7 +242,6 @@
 
             .header {
                 border-radius: 0;
-                padding: 20px;
             }
 
             .card {
@@ -267,14 +249,16 @@
                 padding: 15px;
             }
 
+            .upload-button,
+            .camera-button,
             button {
                 width: 100%;
+                text-align: center;
             }
 
             .buttons {
                 flex-direction: column;
             }
-
         }
 
     </style>
@@ -292,8 +276,7 @@
         </h1>
 
         <p>
-            Upload or take a photo to extract
-            ICCID, QR / LPA Data, PIN and PUK.
+            Extract ICCID, QR / LPA, PIN and PUK from an eSIM card photo.
         </p>
 
     </div>
@@ -301,33 +284,40 @@
 
     <div class="card">
 
+
         <!-- ================================================= -->
         <!-- BUTTONS -->
         <!-- ================================================= -->
 
         <div class="buttons">
 
-            <button
-                type="button"
-                id="uploadButton"
+            <!--
+                IMPORTANT:
+                This is a LABEL, not a JavaScript button.
+                Clicking it directly opens the file picker.
+            -->
+
+            <label
+                for="fileInput"
+                class="upload-button"
             >
                 📁 Upload Photo
-            </button>
+            </label>
 
 
-            <button
-                type="button"
-                id="cameraButton"
+            <label
+                for="cameraInput"
+                class="camera-button"
             >
                 📷 Take Photo
-            </button>
+            </label>
 
 
             <button
                 type="button"
                 id="scanButton"
             >
-                🔍 Scan Photo Again
+                🔍 Scan Again
             </button>
 
 
@@ -352,20 +342,24 @@
 
 
         <!-- ================================================= -->
-        <!-- REAL FILE INPUTS -->
+        <!-- FILE INPUT -->
         <!-- ================================================= -->
 
         <input
-            id="fileInput"
             type="file"
+            id="fileInput"
             accept="image/*"
             multiple
         >
 
 
+        <!-- ================================================= -->
+        <!-- CAMERA INPUT -->
+        <!-- ================================================= -->
+
         <input
-            id="cameraInput"
             type="file"
+            id="cameraInput"
             accept="image/*"
             capture="environment"
         >
@@ -379,7 +373,7 @@
             id="status"
             class="status"
         >
-            Ready. Click "Upload Photo" and select an eSIM card photo.
+            Ready. Click Upload Photo.
         </div>
 
 
@@ -387,17 +381,17 @@
         <!-- SUMMARY -->
         <!-- ================================================= -->
 
-        <div class="result-summary">
+        <div class="summary">
 
             <div class="summary-box">
 
-                <div class="label">
+                <div class="summary-label">
                     Photos
                 </div>
 
                 <div
                     id="photoCount"
-                    class="number"
+                    class="summary-number"
                 >
                     0
                 </div>
@@ -407,13 +401,13 @@
 
             <div class="summary-box">
 
-                <div class="label">
-                    ICCID Found
+                <div class="summary-label">
+                    ICCID
                 </div>
 
                 <div
                     id="iccidCount"
-                    class="number"
+                    class="summary-number"
                 >
                     0
                 </div>
@@ -423,13 +417,13 @@
 
             <div class="summary-box">
 
-                <div class="label">
-                    LPA / QR Found
+                <div class="summary-label">
+                    LPA / QR
                 </div>
 
                 <div
                     id="lpaCount"
-                    class="number"
+                    class="summary-number"
                 >
                     0
                 </div>
@@ -439,13 +433,13 @@
 
             <div class="summary-box">
 
-                <div class="label">
-                    PIN / PUK Found
+                <div class="summary-label">
+                    PIN + PUK
                 </div>
 
                 <div
                     id="pinPukCount"
-                    class="number"
+                    class="summary-number"
                 >
                     0
                 </div>
@@ -456,10 +450,10 @@
 
 
         <!-- ================================================= -->
-        <!-- PHOTO PREVIEW -->
+        <!-- PREVIEW -->
         <!-- ================================================= -->
 
-        <h2 class="section-title">
+        <h2>
             Photo Preview
         </h2>
 
@@ -474,10 +468,9 @@
         <!-- RESULTS -->
         <!-- ================================================= -->
 
-        <h2 class="section-title">
+        <h2>
             Scan Results
         </h2>
-
 
         <div class="table-wrapper">
 
@@ -487,33 +480,19 @@
 
                     <tr>
 
-                        <th>
-                            #
-                        </th>
+                        <th>#</th>
 
-                        <th>
-                            File Name
-                        </th>
+                        <th>Photo</th>
 
-                        <th>
-                            ICCID
-                        </th>
+                        <th>ICCID</th>
 
-                        <th>
-                            QR / LPA Data
-                        </th>
+                        <th>QR / LPA</th>
 
-                        <th>
-                            PIN
-                        </th>
+                        <th>PIN</th>
 
-                        <th>
-                            PUK
-                        </th>
+                        <th>PUK</th>
 
-                        <th>
-                            Confidence
-                        </th>
+                        <th>Confidence</th>
 
                     </tr>
 
@@ -541,47 +520,47 @@
         <!-- OCR -->
         <!-- ================================================= -->
 
-        <h2 class="section-title">
-            Raw OCR Text
+        <h2>
+            OCR Text
         </h2>
-
 
         <div
             id="rawOcr"
             class="ocr-box"
         >
-            OCR text will appear here after scanning.
+            OCR text will appear here.
         </div>
 
 
+        <!-- ================================================= -->
+        <!-- INFORMATION -->
+        <!-- ================================================= -->
+
         <div class="info">
 
-            <strong>How it works:</strong>
+            <strong>
+                Scanner:
+            </strong>
+
+            <br>
+
+            • QR code → LPA / activation data
+
+            <br>
+
+            • Barcode → ICCID
+
+            <br>
+
+            • OCR → PIN
+
+            <br>
+
+            • OCR → PUK
 
             <br><br>
 
-            1. Upload the eSIM card photo.
-
-            <br>
-
-            2. The QR code is scanned to get the LPA / activation data.
-
-            <br>
-
-            3. The barcode is scanned to get the ICCID.
-
-            <br>
-
-            4. OCR reads the printed PIN and PUK.
-
-            <br>
-
-            5. Results are displayed in the table.
-
-            <br><br>
-
-            Processing happens in your browser. The image is not uploaded
-            to a server by this application.
+            Everything is processed in the browser.
 
         </div>
 
@@ -591,11 +570,11 @@
 
 
 <!-- ========================================================= -->
-<!-- YOUR JAVASCRIPT -->
-<!-- IMPORTANT: code.js MUST BE IN THE SAME FOLDER -->
+<!-- JAVASCRIPT -->
 <!-- ========================================================= -->
 
 <script src="./code.js"></script>
+
 
 </body>
 </html>

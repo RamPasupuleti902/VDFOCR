@@ -1,749 +1,1932 @@
-
 "use strict";
 
-const fileInput = document.getElementById("fileInput");
-const cameraInput = document.getElementById("cameraInput");
-const scanButton = document.getElementById("scanButton");
-const exportButton = document.getElementById("exportButton");
-const clearButton = document.getElementById("clearButton");
+document.addEventListener("DOMContentLoaded", () => {
 
-const statusBox = document.getElementById("status");
-const previewGrid = document.getElementById("previewGrid");
-const resultsBody = document.getElementById("resultsBody");
-const rawOcrBox = document.getElementById("rawOcr");
+  const fileInput = document.getElementById("fileInput");
+  const cameraInput = document.getElementById("cameraInput");
 
-let selectedFiles = [];
-let scanResults = [];
-let ocrWorker = null;
-let qrReader = null;
-let barcodeReader = null;
+  const uploadButton = document.getElementById("uploadButton");
+  const cameraButton = document.getElementById("cameraButton");
+  const scanButton = document.getElementById("scanButton");
+  const exportButton = document.getElementById("exportButton");
+  const clearButton = document.getElementById("clearButton");
 
-const WORK_SIZE = 2600;
-const OCR_MAX_PASSES = 10;
+  const statusBox = document.getElementById("status");
+  const previewGrid = document.getElementById("previewGrid");
+  const resultsBody = document.getElementById("resultsBody");
+  const rawOcrBox = document.getElementById("rawOcr");
 
-function setStatus(message) {
-  statusBox.textContent = message;
-}
+  let selectedFiles = [];
+  let scanResults = [];
 
-function escapeCsv(value) {
-  const text = String(value ?? "");
-  return `"${text.replaceAll('"', '""')}"`;
-}
+  let ocrWorker = null;
+  let qrReader = null;
+  let barcodeReader = null;
 
-function normalizeText(text) {
-  return String(text || "")
-    .replace(/[|]/g, "I")
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/\r/g, "\n");
-}
+  const MAX_IMAGE_SIZE = 3200;
 
-function cleanDigits(value) {
-  return String(value || "").replace(/\D/g, "");
-}
 
-function isValidLuhn(number) {
-  const digits = cleanDigits(number);
+  // ============================================================
+  // STATUS
+  // ============================================================
 
-  if (!digits) {
-    return false;
+  function setStatus(text) {
+    statusBox.textContent = text;
   }
 
-  let sum = 0;
-  let alternate = false;
 
-  for (let i = digits.length - 1; i >= 0; i--) {
-    let digit = Number(digits[i]);
+  // ============================================================
+  // UPLOAD / CAMERA BUTTONS
+  // ============================================================
 
-    if (alternate) {
-      digit *= 2;
-
-      if (digit > 9) {
-        digit -= 9;
-      }
-    }
-
-    sum += digit;
-    alternate = !alternate;
-  }
-
-  return sum % 10 === 0;
-}
-
-function normalizeOcrDigits(text) {
-  return String(text || "")
-    .replace(/[Oo]/g, "0")
-    .replace(/[IiLl|!]/g, "1")
-    .replace(/[Zz]/g, "2")
-    .replace(/[Ss]/g, "5")
-    .replace(/[Gg]/g, "6")
-    .replace(/[Bb]/g, "8");
-}
-
-function extractPin(text) {
-  const normalized = normalizeOcrDigits(text);
-
-  const labelledPatterns = [
-    /P\s*I\s*N\s*[:\-]?\s*([0-9]{4})/i,
-    /P\s*I\s*N\s*[:\-]?\s*([0-9]{4})/i,
-    /PIN[^0-9]{0,15}([0-9]{4})/i
-  ];
-
-  for (const pattern of labelledPatterns) {
-    const match = normalized.match(pattern);
-
-    if (match) {
-      return match[1];
-    }
-  }
-
-  const candidates = normalized.match(/\b[0-9]{4}\b/g) || [];
-
-  for (const candidate of candidates) {
-    if (!["0000", "1111", "1234", "9999"].includes(candidate)) {
-      return candidate;
-    }
-  }
-
-  return "";
-}
-
-function extractPuk(text) {
-  const normalized = normalizeOcrDigits(text);
-
-  const labelledPatterns = [
-    /P\s*U\s*K\s*[:\-]?\s*([0-9]{8})/i,
-    /PUK[^0-9]{0,15}([0-9]{8})/i
-  ];
-
-  for (const pattern of labelledPatterns) {
-    const match = normalized.match(pattern);
-
-    if (match) {
-      return match[1];
-    }
-  }
-
-  const candidates = normalized.match(/\b[0-9]{8}\b/g) || [];
-
-  for (const candidate of candidates) {
-    if (!/^0{8}$/.test(candidate)) {
-      return candidate;
-    }
-  }
-
-  return "";
-}
-
-function extractIccidFromText(text) {
-  const normalized = normalizeOcrDigits(text);
-
-  const candidates = normalized.match(/\b[0-9]{18,22}\b/g) || [];
-
-  for (const candidate of candidates) {
-    if (isValidLuhn(candidate)) {
-      return candidate;
-    }
-  }
-
-  return candidates[0] || "";
-}
-
-function extractLpa(text) {
-  const value = String(text || "");
-
-  const lpaMatch = value.match(
-    /LPA\s*:\s*[A-Za-z0-9+\/=_:.-]+/i
-  );
-
-  if (lpaMatch) {
-    return lpaMatch[0].replace(/\s+/g, "");
-  }
-
-  const activationCodeMatch = value.match(
-    /1\$[A-Za-z0-9.-]+\$[A-Za-z0-9+\/=_-]+/
-  );
-
-  if (activationCodeMatch) {
-    return activationCodeMatch[0];
-  }
-
-  return "";
-}
-
-function createImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    const objectUrl = URL.createObjectURL(file);
-
-    image.onload = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(image);
-    };
-
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error("Unable to load image: " + file.name));
-    };
-
-    image.src = objectUrl;
-  });
-}
-
-function drawImageToCanvas(image, crop = null, mode = "normal") {
-  const sourceWidth = image.naturalWidth || image.width;
-  const sourceHeight = image.naturalHeight || image.height;
-
-  let sx = 0;
-  let sy = 0;
-  let sw = sourceWidth;
-  let sh = sourceHeight;
-
-  if (crop) {
-    sx = Math.floor(sourceWidth * crop.x);
-    sy = Math.floor(sourceHeight * crop.y);
-    sw = Math.floor(sourceWidth * crop.width);
-    sh = Math.floor(sourceHeight * crop.height);
-  }
-
-  const scale = Math.min(1, WORK_SIZE / Math.max(sw, sh));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.floor(sw * scale));
-  canvas.height = Math.max(1, Math.floor(sh * scale));
-
-  const context = canvas.getContext("2d", {
-    willReadFrequently: true
+  uploadButton.addEventListener("click", () => {
+    fileInput.click();
   });
 
-  context.drawImage(
-    image,
-    sx,
-    sy,
-    sw,
-    sh,
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
-
-  if (mode !== "normal") {
-    const imageData = context.getImageData(
-      0,
-      0,
-      canvas.width,
-      canvas.height
-    );
-
-    for (let i = 0; i < imageData.data.length; i += 4) {
-      const r = imageData.data[i];
-      const g = imageData.data[i + 1];
-      const b = imageData.data[i + 2];
-
-      let gray = Math.round(
-        0.299 * r + 0.587 * g + 0.114 * b
-      );
-
-      if (mode === "gray") {
-        imageData.data[i] = gray;
-        imageData.data[i + 1] = gray;
-        imageData.data[i + 2] = gray;
-      }
-
-      if (mode === "threshold") {
-        gray = gray > 145 ? 255 : 0;
-
-        imageData.data[i] = gray;
-        imageData.data[i + 1] = gray;
-        imageData.data[i + 2] = gray;
-      }
-
-      if (mode === "invert") {
-        gray = 255 - gray;
-
-        imageData.data[i] = gray;
-        imageData.data[i + 1] = gray;
-        imageData.data[i + 2] = gray;
-      }
-    }
-
-    context.putImageData(imageData, 0, 0);
-  }
-
-  return canvas;
-}
-
-function getImageVariants(image) {
-  const crops = [
-    null,
-    { x: 0, y: 0, width: 1, height: 0.5 },
-    { x: 0, y: 0.5, width: 1, height: 0.5 },
-    { x: 0, y: 0, width: 0.5, height: 1 },
-    { x: 0.5, y: 0, width: 0.5, height: 1 },
-    { x: 0.15, y: 0.15, width: 0.7, height: 0.7 }
-  ];
-
-  const modes = [
-    "normal",
-    "gray",
-    "threshold",
-    "invert"
-  ];
-
-  const variants = [];
-
-  for (const crop of crops) {
-    for (const mode of modes) {
-      if (variants.length >= OCR_MAX_PASSES) {
-        return variants;
-      }
-
-      variants.push(drawImageToCanvas(image, crop, mode));
-    }
-  }
-
-  return variants;
-}
-
-function scanQrWithJsQr(canvas) {
-  if (typeof jsQR === "undefined") {
-    return "";
-  }
-
-  const context = canvas.getContext("2d", {
-    willReadFrequently: true
+  cameraButton.addEventListener("click", () => {
+    cameraInput.click();
   });
 
-  const imageData = context.getImageData(
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
 
-  const result = jsQR(
-    imageData.data,
-    imageData.width,
-    imageData.height,
-    {
-      inversionAttempts: "attemptBoth"
-    }
-  );
+  fileInput.addEventListener("change", event => {
 
-  return result?.data || "";
-}
+    addFiles(event.target.files);
 
-async function initializeReaders() {
-  if (typeof ZXing === "undefined") {
-    return;
-  }
-
-  if (!qrReader) {
-    const qrHints = new Map();
-
-    qrHints.set(
-      ZXing.DecodeHintType.TRY_HARDER,
-      true
-    );
-
-    qrHints.set(
-      ZXing.DecodeHintType.POSSIBLE_FORMATS,
-      [ZXing.BarcodeFormat.QR_CODE]
-    );
-
-    qrReader = new ZXing.BrowserMultiFormatReader(qrHints);
-  }
-
-  if (!barcodeReader) {
-    const barcodeHints = new Map();
-
-    barcodeHints.set(
-      ZXing.DecodeHintType.TRY_HARDER,
-      true
-    );
-
-    barcodeHints.set(
-      ZXing.DecodeHintType.POSSIBLE_FORMATS,
-      [
-        ZXing.BarcodeFormat.CODE_128,
-        ZXing.BarcodeFormat.CODE_39,
-        ZXing.BarcodeFormat.ITF,
-        ZXing.BarcodeFormat.EAN_13
-      ]
-    );
-
-    barcodeReader = new ZXing.BrowserMultiFormatReader(
-      barcodeHints
-    );
-  }
-}
-
-async function scanQrWithZxing(canvas) {
-  if (!qrReader) {
-    return "";
-  }
-
-  try {
-    const result = await qrReader.decodeFromCanvas(canvas);
-    return result?.getText?.() || "";
-  } catch {
-    return "";
-  }
-}
-
-async function scanBarcodeWithZxing(canvas) {
-  if (!barcodeReader) {
-    return "";
-  }
-
-  try {
-    const result = await barcodeReader.decodeFromCanvas(canvas);
-    return result?.getText?.() || "";
-  } catch {
-    return "";
-  }
-}
-
-async function getOcrWorker() {
-  if (ocrWorker) {
-    return ocrWorker;
-  }
-
-  if (typeof Tesseract === "undefined") {
-    throw new Error("Tesseract.js did not load.");
-  }
-
-  setStatus("Loading OCR engine...");
-
-  ocrWorker = await Tesseract.createWorker("eng", 1, {
-    logger: message => {
-      if (
-        message &&
-        message.status === "recognizing text"
-      ) {
-        const progress = Math.round(
-          (message.progress || 0) * 100
-        );
-
-        setStatus("OCR progress: " + progress + "%");
-      }
-    }
   });
 
-  try {
-    await ocrWorker.setParameters({
-      tessedit_pageseg_mode: "6",
-      preserve_interword_spaces: "1"
-    });
-  } catch {
-    // Some Tesseract versions may not support these settings.
+
+  cameraInput.addEventListener("change", event => {
+
+    addFiles(event.target.files);
+
+  });
+
+
+  function addFiles(files) {
+
+    const incomingFiles = Array.from(files || []);
+
+    if (!incomingFiles.length) {
+      return;
+    }
+
+    selectedFiles =
+      selectedFiles.concat(incomingFiles);
+
+    setStatus(
+      selectedFiles.length +
+      " photo(s) selected. Click Scan Photo."
+    );
   }
 
-  return ocrWorker;
-}
 
-async function recognizeText(canvas) {
-  const worker = await getOcrWorker();
+  // ============================================================
+  // OCR DIGIT NORMALIZATION
+  // ============================================================
 
-  const result = await worker.recognize(canvas);
+  function normalizeDigits(text) {
 
-  return result?.data?.text || "";
-}
+    return String(text || "")
+      .replace(/[Oo]/g, "0")
+      .replace(/[IiLl|!]/g, "1")
+      .replace(/[Zz]/g, "2")
+      .replace(/[Ss]/g, "5")
+      .replace(/[Gg]/g, "6")
+      .replace(/[Bb]/g, "8");
 
-function addPreview(file, image) {
-  const card = document.createElement("div");
-  card.className = "preview-card";
+  }
 
-  const title = document.createElement("h3");
-  title.textContent = file.name;
 
-  const imageElement = document.createElement("img");
-  imageElement.src = image.src || "";
-  imageElement.alt = "Uploaded eSIM card image";
+  // ============================================================
+  // LUHN CHECK
+  // ============================================================
 
-  card.appendChild(title);
-  card.appendChild(imageElement);
+  function luhn(number) {
 
-  previewGrid.appendChild(card);
-}
+    const digits =
+      String(number || "")
+        .replace(/\D/g, "");
 
-async function scanFile(file, index) {
-  setStatus(
-    `Processing ${index + 1} of ${selectedFiles.length}: ${file.name}`
-  );
-
-  const image = await createImageFromFile(file);
-
-  const imageUrl = URL.createObjectURL(file);
-
-  const previewCard = document.createElement("div");
-  previewCard.className = "preview-card";
-
-  const previewTitle = document.createElement("h3");
-  previewTitle.textContent = file.name;
-
-  const previewImage = document.createElement("img");
-  previewImage.src = imageUrl;
-  previewImage.alt = "eSIM card preview";
-
-  previewCard.appendChild(previewTitle);
-  previewCard.appendChild(previewImage);
-  previewGrid.appendChild(previewCard);
-
-  await initializeReaders();
-
-  const variants = getImageVariants(image);
-
-  let qrData = "";
-  let barcodeData = "";
-  let ocrText = "";
-
-  for (const canvas of variants) {
-    if (!qrData) {
-      qrData = scanQrWithJsQr(canvas);
+    if (!digits) {
+      return false;
     }
 
-    if (!qrData) {
-      qrData = await scanQrWithZxing(canvas);
-    }
+    let sum = 0;
+    let alternate = false;
 
-    if (!barcodeData) {
-      barcodeData = await scanBarcodeWithZxing(canvas);
-    }
+    for (
+      let i = digits.length - 1;
+      i >= 0;
+      i--
+    ) {
 
-    if (!ocrText) {
-      ocrText = await recognizeText(canvas);
-    } else {
-      const additionalText = await recognizeText(canvas);
+      let n = Number(digits[i]);
 
-      if (additionalText.length > ocrText.length) {
-        ocrText = additionalText;
+      if (alternate) {
+
+        n = n * 2;
+
+        if (n > 9) {
+          n = n - 9;
+        }
+
       }
+
+      sum += n;
+
+      alternate = !alternate;
     }
 
-    if (qrData && barcodeData && ocrText.length > 20) {
-      break;
-    }
+    return sum % 10 === 0;
+
   }
 
-  const combinedText = normalizeText(
-    [ocrText, qrData, barcodeData].join("\n")
-  );
 
-  const pin = extractPin(combinedText);
-  const puk = extractPuk(combinedText);
+  // ============================================================
+  // PIN
+  // ============================================================
 
-  let iccid = "";
+  function extractPin(text) {
 
-  if (/^\d{18,22}$/.test(barcodeData)) {
-    iccid = barcodeData;
-  }
+    const t = normalizeDigits(text);
 
-  if (!iccid) {
-    iccid = extractIccidFromText(combinedText);
-  }
+    const patterns = [
 
-  const lpaData = qrData || extractLpa(combinedText);
+      /P\s*I\s*N\s*[:\-]?\s*([0-9]{4})/i,
 
-  rawOcrBox.textContent +=
-    `\n\n===== ${file.name} =====\n${ocrText || "No OCR text found"}`;
+      /PIN[^0-9]{0,12}([0-9]{4})/i
 
-  return {
-    fileName: file.name,
-    iccid,
-    lpa: lpaData,
-    pin,
-    puk,
-    confidence: calculateConfidence({
-      iccid,
-      lpa: lpaData,
-      pin,
-      puk
-    })
-  };
-}
-
-function calculateConfidence(result) {
-  let score = 0;
-
-  if (result.iccid) {
-    score += 25;
-  }
-
-  if (result.lpa) {
-    score += 25;
-  }
-
-  if (/^\d{4}$/.test(result.pin)) {
-    score += 25;
-  }
-
-  if (/^\d{8}$/.test(result.puk)) {
-    score += 25;
-  }
-
-  return score + "%";
-}
-
-function renderResults() {
-  resultsBody.innerHTML = "";
-
-  if (!scanResults.length) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-
-    cell.colSpan = 7;
-    cell.textContent = "No results yet.";
-
-    row.appendChild(cell);
-    resultsBody.appendChild(row);
-
-    return;
-  }
-
-  scanResults.forEach((result, index) => {
-    const row = document.createElement("tr");
-
-    const values = [
-      index + 1,
-      result.fileName,
-      result.iccid,
-      result.lpa,
-      result.pin,
-      result.puk,
-      result.confidence
     ];
 
-    values.forEach(value => {
-      const cell = document.createElement("td");
-      cell.textContent = value || "";
-      row.appendChild(cell);
-    });
+    for (const pattern of patterns) {
 
-    resultsBody.appendChild(row);
-  });
-}
+      const match =
+        t.match(pattern);
 
-async function scanSelectedFiles() {
-  if (!selectedFiles.length) {
-    setStatus("Please upload or take a photo first.");
-    return;
-  }
+      if (match) {
+        return match[1];
+      }
 
-  scanButton.disabled = true;
-  scanResults = [];
-  previewGrid.innerHTML = "";
-  rawOcrBox.textContent = "";
-
-  try {
-    for (let i = 0; i < selectedFiles.length; i++) {
-      const result = await scanFile(
-        selectedFiles[i],
-        i
-      );
-
-      scanResults.push(result);
-      renderResults();
     }
 
-    setStatus(
-      `Completed. Scanned ${scanResults.length} file(s).`
-    );
-  } catch (error) {
-    console.error(error);
+    return "";
 
-    setStatus(
-      "Scanning failed: " +
-      (error.message || "Unknown error")
-    );
-  } finally {
-    scanButton.disabled = false;
-  }
-}
-
-function addFiles(files) {
-  const incomingFiles = Array.from(files || []);
-
-  selectedFiles.push(...incomingFiles);
-
-  setStatus(
-    `${selectedFiles.length} photo(s) selected. Click Scan Photo.`
-  );
-}
-
-function exportCsv() {
-  if (!scanResults.length) {
-    setStatus("There are no results to export.");
-    return;
   }
 
-  const headers = [
-    "File Name",
-    "ICCID",
-    "QR / LPA Data",
-    "PIN",
-    "PUK",
-    "Confidence"
-  ];
 
-  const rows = scanResults.map(result => [
-    result.fileName,
-    result.iccid,
-    result.lpa,
-    result.pin,
-    result.puk,
-    result.confidence
-  ]);
+  // ============================================================
+  // PUK
+  // ============================================================
 
-  const csv = [
-    headers,
-    ...rows
-  ]
-    .map(row => row.map(escapeCsv).join(","))
-    .join("\n");
+  function extractPuk(text) {
 
-  const blob = new Blob(
-    [csv],
-    { type: "text/csv;charset=utf-8;" }
+    const t = normalizeDigits(text);
+
+    const patterns = [
+
+      /P\s*U\s*K\s*[:\-]?\s*([0-9]{8})/i,
+
+      /PUK[^0-9]{0,12}([0-9]{8})/i
+
+    ];
+
+    for (const pattern of patterns) {
+
+      const match =
+        t.match(pattern);
+
+      if (match) {
+        return match[1];
+      }
+
+    }
+
+    return "";
+
+  }
+
+
+  // ============================================================
+  // ICCID FROM OCR
+  // ============================================================
+
+  function extractIccid(text) {
+
+    const t =
+      normalizeDigits(text);
+
+    /*
+      ICCID must normally contain
+      18 to 22 digits.
+    */
+
+    const candidates =
+      t.match(/\b\d{18,22}\b/g) || [];
+
+
+    /*
+      First prefer Luhn-valid ICCID.
+    */
+
+    for (const candidate of candidates) {
+
+      if (luhn(candidate)) {
+        return candidate;
+      }
+
+    }
+
+
+    /*
+      If no Luhn-valid candidate,
+      still accept a proper ICCID length.
+    */
+
+    return candidates[0] || "";
+
+  }
+
+
+  // ============================================================
+  // LPA FROM OCR
+  // ============================================================
+
+  function extractLpa(text) {
+
+    const t =
+      String(text || "");
+
+
+    const lpa =
+      t.match(
+        /LPA\s*:\s*[A-Za-z0-9+\/=_:.-]+/i
+      );
+
+
+    if (lpa) {
+
+      return lpa[0]
+        .replace(/\s+/g, "");
+
+    }
+
+
+    /*
+      Common eSIM activation-code format
+    */
+
+    const activation =
+      t.match(
+        /1\$[A-Za-z0-9.-]+\$[A-Za-z0-9+\/=_-]+/
+      );
+
+
+    if (activation) {
+
+      return activation[0];
+
+    }
+
+
+    return "";
+
+  }
+
+
+  // ============================================================
+  // LOAD IMAGE
+  // ============================================================
+
+  function loadImage(file) {
+
+    return new Promise(
+      (resolve, reject) => {
+
+        const img =
+          new Image();
+
+        const url =
+          URL.createObjectURL(file);
+
+
+        img.onload = () => {
+
+          URL.revokeObjectURL(url);
+
+          resolve(img);
+
+        };
+
+
+        img.onerror = () => {
+
+          URL.revokeObjectURL(url);
+
+          reject(
+            new Error(
+              "Unable to load image: " +
+              file.name
+            )
+          );
+
+        };
+
+
+        img.src = url;
+
+      }
+    );
+
+  }
+
+
+  // ============================================================
+  // CREATE CANVAS
+  // ============================================================
+
+  function canvasFromImage(
+    img,
+    crop = null,
+    mode = "normal",
+    rotate = 0
+  ) {
+
+    const imageWidth =
+      img.naturalWidth ||
+      img.width;
+
+    const imageHeight =
+      img.naturalHeight ||
+      img.height;
+
+
+    let sx = 0;
+    let sy = 0;
+    let sw = imageWidth;
+    let sh = imageHeight;
+
+
+    if (crop) {
+
+      sx =
+        Math.floor(
+          imageWidth * crop.x
+        );
+
+      sy =
+        Math.floor(
+          imageHeight * crop.y
+        );
+
+      sw =
+        Math.floor(
+          imageWidth * crop.width
+        );
+
+      sh =
+        Math.floor(
+          imageHeight * crop.height
+        );
+
+    }
+
+
+    const scale =
+      Math.min(
+        1,
+        MAX_IMAGE_SIZE /
+        Math.max(sw, sh)
+      );
+
+
+    const width =
+      Math.max(
+        1,
+        Math.floor(sw * scale)
+      );
+
+
+    const height =
+      Math.max(
+        1,
+        Math.floor(sh * scale)
+      );
+
+
+    const canvas =
+      document.createElement(
+        "canvas"
+      );
+
+
+    if (
+      rotate === 90 ||
+      rotate === 270
+    ) {
+
+      canvas.width = height;
+      canvas.height = width;
+
+    } else {
+
+      canvas.width = width;
+      canvas.height = height;
+
+    }
+
+
+    const ctx =
+      canvas.getContext(
+        "2d",
+        {
+          willReadFrequently: true
+        }
+      );
+
+
+    ctx.save();
+
+
+    if (rotate === 90) {
+
+      ctx.translate(
+        height,
+        0
+      );
+
+      ctx.rotate(
+        Math.PI / 2
+      );
+
+    }
+
+
+    else if (rotate === 180) {
+
+      ctx.translate(
+        width,
+        height
+      );
+
+      ctx.rotate(
+        Math.PI
+      );
+
+    }
+
+
+    else if (rotate === 270) {
+
+      ctx.translate(
+        0,
+        width
+      );
+
+      ctx.rotate(
+        -Math.PI / 2
+      );
+
+    }
+
+
+    ctx.drawImage(
+      img,
+      sx,
+      sy,
+      sw,
+      sh,
+      0,
+      0,
+      width,
+      height
+    );
+
+
+    ctx.restore();
+
+
+    /*
+      Image processing
+    */
+
+    if (mode !== "normal") {
+
+      const imageData =
+        ctx.getImageData(
+          0,
+          0,
+          canvas.width,
+          canvas.height
+        );
+
+
+      for (
+        let i = 0;
+        i < imageData.data.length;
+        i += 4
+      ) {
+
+        let gray =
+          Math.round(
+            0.299 *
+              imageData.data[i] +
+
+            0.587 *
+              imageData.data[i + 1] +
+
+            0.114 *
+              imageData.data[i + 2]
+          );
+
+
+        if (
+          mode === "threshold"
+        ) {
+
+          gray =
+            gray > 145
+              ? 255
+              : 0;
+
+        }
+
+
+        if (
+          mode === "invert"
+        ) {
+
+          gray =
+            255 - gray;
+
+        }
+
+
+        imageData.data[i] =
+          gray;
+
+        imageData.data[i + 1] =
+          gray;
+
+        imageData.data[i + 2] =
+          gray;
+
+      }
+
+
+      ctx.putImageData(
+        imageData,
+        0,
+        0
+      );
+
+    }
+
+
+    return canvas;
+
+  }
+
+
+  // ============================================================
+  // CARD AREAS
+  //
+  // Your card:
+  //
+  // PIN/PUK = upper-left
+  // QR       = upper-right
+  // ICCID    = bottom
+  // ============================================================
+
+  function getCardRegions() {
+
+    return {
+
+      qr: [
+
+        {
+          x: 0.45,
+          y: 0.00,
+          width: 0.55,
+          height: 0.70
+        },
+
+        {
+          x: 0.50,
+          y: 0.05,
+          width: 0.47,
+          height: 0.62
+        },
+
+        {
+          x: 0.40,
+          y: 0.00,
+          width: 0.60,
+          height: 0.75
+        }
+
+      ],
+
+
+      pinPuk: [
+
+        {
+          x: 0.00,
+          y: 0.00,
+          width: 0.60,
+          height: 0.42
+        },
+
+        {
+          x: 0.05,
+          y: 0.05,
+          width: 0.50,
+          height: 0.35
+        },
+
+        {
+          x: 0.00,
+          y: 0.00,
+          width: 0.70,
+          height: 0.55
+        }
+
+      ],
+
+
+      barcode: [
+
+        {
+          x: 0.30,
+          y: 0.58,
+          width: 0.70,
+          height: 0.42
+        },
+
+        {
+          x: 0.20,
+          y: 0.55,
+          width: 0.80,
+          height: 0.45
+        },
+
+        {
+          x: 0.35,
+          y: 0.60,
+          width: 0.65,
+          height: 0.40
+        }
+
+      ],
+
+
+      whole: [
+
+        null,
+
+        {
+          x: 0,
+          y: 0,
+          width: 1,
+          height: 0.55
+        },
+
+        {
+          x: 0,
+          y: 0.45,
+          width: 1,
+          height: 0.55
+        }
+
+      ]
+
+    };
+
+  }
+
+
+  // ============================================================
+  // QR WITH jsQR
+  // ============================================================
+
+  function decodeJsQR(canvas) {
+
+    if (
+      typeof window.jsQR !==
+      "function"
+    ) {
+
+      return "";
+
+    }
+
+
+    try {
+
+      const ctx =
+        canvas.getContext(
+          "2d",
+          {
+            willReadFrequently: true
+          }
+        );
+
+
+      const imageData =
+        ctx.getImageData(
+          0,
+          0,
+          canvas.width,
+          canvas.height
+        );
+
+
+      const result =
+        window.jsQR(
+          imageData.data,
+          imageData.width,
+          imageData.height,
+          {
+            inversionAttempts:
+              "attemptBoth"
+          }
+        );
+
+
+      return (
+        result?.data ||
+        ""
+      );
+
+    }
+
+    catch {
+
+      return "";
+
+    }
+
+  }
+
+
+  // ============================================================
+  // ZXING
+  // ============================================================
+
+  async function initializeZXing() {
+
+    if (!window.ZXing) {
+
+      return;
+
+    }
+
+
+    if (!qrReader) {
+
+      const hints =
+        new Map();
+
+
+      hints.set(
+        ZXing.DecodeHintType.TRY_HARDER,
+        true
+      );
+
+
+      hints.set(
+        ZXing.DecodeHintType.POSSIBLE_FORMATS,
+        [
+          ZXing.BarcodeFormat.QR_CODE
+        ]
+      );
+
+
+      qrReader =
+        new ZXing.BrowserMultiFormatReader(
+          hints
+        );
+
+    }
+
+
+    if (!barcodeReader) {
+
+      const hints =
+        new Map();
+
+
+      hints.set(
+        ZXing.DecodeHintType.TRY_HARDER,
+        true
+      );
+
+
+      hints.set(
+        ZXing.DecodeHintType.POSSIBLE_FORMATS,
+        [
+          ZXing.BarcodeFormat.CODE_128,
+          ZXing.BarcodeFormat.CODE_39,
+          ZXing.BarcodeFormat.ITF,
+          ZXing.BarcodeFormat.EAN_13,
+          ZXing.BarcodeFormat.EAN_8
+        ]
+      );
+
+
+      barcodeReader =
+        new ZXing.BrowserMultiFormatReader(
+          hints
+        );
+
+    }
+
+  }
+
+
+  async function decodeZXing(
+    reader,
+    canvas
+  ) {
+
+    if (!reader) {
+
+      return "";
+
+    }
+
+
+    try {
+
+      const result =
+        await reader.decodeFromCanvas(
+          canvas
+        );
+
+
+      return (
+        result?.getText?.() ||
+        ""
+      );
+
+    }
+
+    catch {
+
+      return "";
+
+    }
+
+  }
+
+
+  // ============================================================
+  // OCR WORKER
+  // ============================================================
+
+  async function getOcrWorker() {
+
+    if (ocrWorker) {
+
+      return ocrWorker;
+
+    }
+
+
+    if (!window.Tesseract) {
+
+      throw new Error(
+        "Tesseract.js did not load."
+      );
+
+    }
+
+
+    setStatus(
+      "Loading OCR engine..."
+    );
+
+
+    ocrWorker =
+      await Tesseract.createWorker(
+        "eng",
+        1,
+        {
+
+          logger: message => {
+
+            if (
+              message &&
+              message.status ===
+              "recognizing text"
+            ) {
+
+              const progress =
+                Math.round(
+                  (message.progress || 0) *
+                  100
+                );
+
+
+              setStatus(
+                "OCR progress: " +
+                progress +
+                "%"
+              );
+
+            }
+
+          }
+
+        }
+      );
+
+
+    try {
+
+      await ocrWorker.setParameters({
+
+        tessedit_pageseg_mode:
+          "6",
+
+        preserve_interword_spaces:
+          "1"
+
+      });
+
+    }
+
+    catch (_) {}
+
+
+    return ocrWorker;
+
+  }
+
+
+  async function recognize(canvas) {
+
+    const worker =
+      await getOcrWorker();
+
+
+    const result =
+      await worker.recognize(
+        canvas
+      );
+
+
+    return (
+      result?.data?.text ||
+      ""
+    );
+
+  }
+
+
+  // ============================================================
+  // SCAN QR
+  // ============================================================
+
+  async function scanQR(img) {
+
+    const regions =
+      getCardRegions().qr;
+
+
+    for (
+      const crop of regions
+    ) {
+
+      for (
+        const mode of [
+          "normal",
+          "gray",
+          "threshold"
+        ]
+      ) {
+
+        for (
+          const rotation of [
+            0,
+            90,
+            270
+          ]
+        ) {
+
+          const canvas =
+            canvasFromImage(
+              img,
+              crop,
+              mode,
+              rotation
+            );
+
+
+          /*
+            First jsQR
+          */
+
+          let result =
+            decodeJsQR(
+              canvas
+            );
+
+
+          if (result) {
+
+            return result;
+
+          }
+
+
+          /*
+            Then ZXing
+          */
+
+          result =
+            await decodeZXing(
+              qrReader,
+              canvas
+            );
+
+
+          if (result) {
+
+            return result;
+
+          }
+
+        }
+
+      }
+
+    }
+
+
+    return "";
+
+  }
+
+
+  // ============================================================
+  // SCAN ICCID BARCODE
+  // ============================================================
+
+  async function scanBarcode(img) {
+
+    const regions =
+      getCardRegions().barcode;
+
+
+    for (
+      const crop of regions
+    ) {
+
+      for (
+        const mode of [
+          "normal",
+          "gray",
+          "threshold"
+        ]
+      ) {
+
+        for (
+          const rotation of [
+            0,
+            180
+          ]
+        ) {
+
+          const canvas =
+            canvasFromImage(
+              img,
+              crop,
+              mode,
+              rotation
+            );
+
+
+          const result =
+            await decodeZXing(
+              barcodeReader,
+              canvas
+            );
+
+
+          const digits =
+            String(result || "")
+              .replace(
+                /\D/g,
+                ""
+              );
+
+
+          /*
+            Only accept a proper ICCID length.
+          */
+
+          if (
+            digits.length >= 18 &&
+            digits.length <= 22
+          ) {
+
+            return digits;
+
+          }
+
+        }
+
+      }
+
+    }
+
+
+    return "";
+
+  }
+
+
+  // ============================================================
+  // SCAN PIN / PUK
+  // ============================================================
+
+  async function scanPinPuk(img) {
+
+    const regions =
+      getCardRegions().pinPuk;
+
+
+    let bestText = "";
+
+
+    for (
+      const crop of regions
+    ) {
+
+      for (
+        const mode of [
+          "normal",
+          "gray",
+          "threshold"
+        ]
+      ) {
+
+        const canvas =
+          canvasFromImage(
+            img,
+            crop,
+            mode,
+            0
+          );
+
+
+        const text =
+          await recognize(
+            canvas
+          );
+
+
+        if (
+          text.length >
+          bestText.length
+        ) {
+
+          bestText =
+            text;
+
+        }
+
+
+        const pin =
+          extractPin(text);
+
+
+        const puk =
+          extractPuk(text);
+
+
+        if (
+          pin ||
+          puk
+        ) {
+
+          return {
+
+            pin: pin,
+
+            puk: puk,
+
+            text: bestText
+
+          };
+
+        }
+
+      }
+
+    }
+
+
+    return {
+
+      pin:
+        extractPin(
+          bestText
+        ),
+
+      puk:
+        extractPuk(
+          bestText
+        ),
+
+      text:
+        bestText
+
+    };
+
+  }
+
+
+  // ============================================================
+  // FALLBACK OCR
+  // ============================================================
+
+  async function wholeCardOCR(img) {
+
+    const regions =
+      getCardRegions().whole;
+
+
+    let bestText = "";
+
+
+    for (
+      const crop of regions
+    ) {
+
+      for (
+        const mode of [
+          "normal",
+          "gray"
+        ]
+      ) {
+
+        const canvas =
+          canvasFromImage(
+            img,
+            crop,
+            mode,
+            0
+          );
+
+
+        const text =
+          await recognize(
+            canvas
+          );
+
+
+        if (
+          text.length >
+          bestText.length
+        ) {
+
+          bestText =
+            text;
+
+        }
+
+      }
+
+    }
+
+
+    return bestText;
+
+  }
+
+
+  // ============================================================
+  // RENDER RESULTS
+  // ============================================================
+
+  function renderResults() {
+
+    resultsBody.innerHTML = "";
+
+
+    if (
+      !scanResults.length
+    ) {
+
+      resultsBody.innerHTML =
+        `
+        <tr>
+          <td colspan="7">
+            No results yet.
+          </td>
+        </tr>
+        `;
+
+      return;
+
+    }
+
+
+    scanResults.forEach(
+      (result, index) => {
+
+        const row =
+          document.createElement(
+            "tr"
+          );
+
+
+        const values = [
+
+          index + 1,
+
+          result.fileName,
+
+          result.iccid,
+
+          result.lpa,
+
+          result.pin,
+
+          result.puk,
+
+          result.confidence
+
+        ];
+
+
+        values.forEach(
+          value => {
+
+            const cell =
+              document.createElement(
+                "td"
+              );
+
+
+            cell.textContent =
+              value || "";
+
+
+            row.appendChild(
+              cell
+            );
+
+          }
+        );
+
+
+        resultsBody.appendChild(
+          row
+        );
+
+      }
+    );
+
+  }
+
+
+  // ============================================================
+  // SCAN FILE
+  // ============================================================
+
+  async function scanFile(
+    file,
+    index
+  ) {
+
+    setStatus(
+      "Scanning " +
+      (index + 1) +
+      " of " +
+      selectedFiles.length +
+      ": " +
+      file.name
+    );
+
+
+    const img =
+      await loadImage(
+        file
+      );
+
+
+    /*
+      Preview
+    */
+
+    const card =
+      document.createElement(
+        "div"
+      );
+
+    card.className =
+      "preview-card";
+
+
+    const title =
+      document.createElement(
+        "h3"
+      );
+
+    title.textContent =
+      file.name;
+
+
+    const preview =
+      document.createElement(
+        "img"
+      );
+
+
+    preview.src =
+      URL.createObjectURL(
+        file
+      );
+
+
+    preview.alt =
+      "eSIM card photo";
+
+
+    card.appendChild(
+      title
+    );
+
+
+    card.appendChild(
+      preview
+    );
+
+
+    previewGrid.appendChild(
+      card
+    );
+
+
+    await initializeZXing();
+
+
+    // ----------------------------------------------------------
+    // QR / LPA
+    // ----------------------------------------------------------
+
+    setStatus(
+      "Scanning QR / LPA..."
+    );
+
+
+    const lpa =
+      await scanQR(
+        img
+      );
+
+
+    // ----------------------------------------------------------
+    // ICCID
+    // ----------------------------------------------------------
+
+    setStatus(
+      "Scanning ICCID barcode..."
+    );
+
+
+    let iccid =
+      await scanBarcode(
+        img
+      );
+
+
+    // ----------------------------------------------------------
+    // PIN / PUK
+    // ----------------------------------------------------------
+
+    setStatus(
+      "Reading PIN / PUK..."
+    );
+
+
+    const pinPuk =
+      await scanPinPuk(
+        img
+      );
+
+
+    // ----------------------------------------------------------
+    // FALLBACK OCR
+    // ----------------------------------------------------------
+
+    let wholeText = "";
+
+
+    if (
+      !iccid ||
+      !lpa ||
+      !pinPuk.pin ||
+      !pinPuk.puk
+    ) {
+
+      setStatus(
+        "Running fallback OCR..."
+      );
+
+
+      wholeText =
+        await wholeCardOCR(
+          img
+        );
+
+    }
+
+
+    // ICCID fallback
+
+    if (!iccid) {
+
+      iccid =
+        extractIccid(
+          wholeText +
+          "\n" +
+          pinPuk.text
+        );
+
+    }
+
+
+    // PIN
+
+    const pin =
+      pinPuk.pin ||
+      extractPin(
+        wholeText
+      );
+
+
+    // PUK
+
+    const puk =
+      pinPuk.puk ||
+      extractPuk(
+        wholeText
+      );
+
+
+    // LPA
+
+    const finalLpa =
+      lpa ||
+      extractLpa(
+        wholeText
+      );
+
+
+    /*
+      Raw OCR
+    */
+
+    const combinedOCR =
+      [
+        pinPuk.text,
+        wholeText
+      ]
+      .filter(Boolean)
+      .join("\n");
+
+
+    rawOcrBox.textContent +=
+      "\n\n===== " +
+      file.name +
+      " =====\n" +
+      (
+        combinedOCR ||
+        "No OCR text found"
+      );
+
+
+    /*
+      Confidence
+    */
+
+    let found = 0;
+
+
+    if (iccid) {
+      found++;
+    }
+
+
+    if (finalLpa) {
+      found++;
+    }
+
+
+    if (pin) {
+      found++;
+    }
+
+
+    if (puk) {
+      found++;
+    }
+
+
+    return {
+
+      fileName:
+        file.name,
+
+      iccid:
+        iccid,
+
+      lpa:
+        finalLpa,
+
+      pin:
+        pin,
+
+      puk:
+        puk,
+
+      confidence:
+        (found * 25) +
+        "%"
+
+    };
+
+  }
+
+
+  // ============================================================
+  // SCAN BUTTON
+  // ============================================================
+
+  scanButton.addEventListener(
+    "click",
+    async () => {
+
+      if (
+        !selectedFiles.length
+      ) {
+
+        setStatus(
+          "Please upload a photo first."
+        );
+
+        return;
+
+      }
+
+
+      scanButton.disabled =
+        true;
+
+
+      scanResults = [];
+
+
+      previewGrid.innerHTML =
+        "";
+
+
+      rawOcrBox.textContent =
+        "";
+
+
+      try {
+
+        for (
+          let i = 0;
+          i < selectedFiles.length;
+          i++
+        ) {
+
+          const result =
+            await scanFile(
+              selectedFiles[i],
+              i
+            );
+
+
+          scanResults.push(
+            result
+          );
+
+
+          renderResults();
+
+        }
+
+
+        setStatus(
+          "Completed. Scanned " +
+          scanResults.length +
+          " photo(s)."
+        );
+
+      }
+
+
+      catch (error) {
+
+        console.error(
+          error
+        );
+
+
+        setStatus(
+          "Scanning failed: " +
+          (
+            error.message ||
+            error
+          )
+        );
+
+      }
+
+
+      finally {
+
+        scanButton.disabled =
+          false;
+
+      }
+
+    }
   );
 
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
 
-  link.href = url;
-  link.download = "esim-scan-results.csv";
-  link.click();
+  // ============================================================
+  // EXPORT CSV
+  // ============================================================
 
-  URL.revokeObjectURL(url);
-}
+  exportButton.addEventListener(
+    "click",
+    () => {
 
-function clearAll() {
-  selectedFiles = [];
-  scanResults = [];
+      if (
+        !scanResults.length
+      ) {
 
-  fileInput.value = "";
-  cameraInput.value = "";
+        setStatus(
+          "There are no results to export."
+        );
 
-  previewGrid.innerHTML = "";
-  rawOcrBox.textContent =
-    "OCR text will appear here after scanning.";
+        return;
+
+      }
+
+
+      const headers = [
+
+        "File Name",
+
+        "ICCID",
+
+        "QR / LPA Data",
+
+        "PIN",
+
+        "PUK",
+
+        "Confidence"
+
+      ];
+
+
+      const rows =
+        scanResults.map(
+          result => [
+
+            result.fileName,
+
+            result.iccid,
+
+            result.lpa,
+
+            result.pin,
+
+            result.puk,
+
+            result.confidence
+
+          ]
+        );
+
+
+      const csv =
+        [headers, ...rows]
+        .map(
+          row =>
+            row
+              .map(
+                value =>
+                  '"' +
+                  String(
+                    value ?? ""
+                  )
+                  .replaceAll(
+                    '"',
+                    '""'
+                  ) +
+                  '"'
+              )
+              .join(",")
+        )
+        .join("\n");
+
+
+      const blob =
+        new Blob(
+          [csv],
+          {
+            type:
+              "text/csv;charset=utf-8"
+          }
+        );
+
+
+      const url =
+        URL.createObjectURL(
+          blob
+        );
+
+
+      const link =
+        document.createElement(
+          "a"
+        );
+
+
+      link.href =
+        url;
+
+
+      link.download =
+        "esim-scan-results.csv";
+
+
+      link.click();
+
+
+      URL.revokeObjectURL(
+        url
+      );
+
+    }
+  );
+
+
+  // ============================================================
+  // CLEAR
+  // ============================================================
+
+  clearButton.addEventListener(
+    "click",
+    () => {
+
+      selectedFiles = [];
+
+      scanResults = [];
+
+
+      fileInput.value =
+        "";
+
+      cameraInput.value =
+        "";
+
+
+      previewGrid.innerHTML =
+        "";
+
+
+      rawOcrBox.textContent =
+        "OCR text will appear here after scanning.";
+
+
+      renderResults();
+
+
+      setStatus(
+        "Cleared. Ready for a new photo."
+      );
+
+    }
+  );
+
+
+  // Initial state
 
   renderResults();
 
-  setStatus("Cleared. Ready for a new photo.");
-}
+  setStatus(
+    "Ready. Click Upload Photo or Take Photo."
+  );
 
-fileInput.addEventListener("change", event => {
-  addFiles(event.target.files);
 });
-
-cameraInput.addEventListener("change", event => {
-  addFiles(event.target.files);
-});
-
-scanButton.addEventListener("click", scanSelectedFiles);
-exportButton.addEventListener("click", exportCsv);
-clearButton.addEventListener("click", clearAll);
-
-renderResults();

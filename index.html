@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
+
     <meta charset="UTF-8">
 
     <meta
@@ -10,13 +12,16 @@
 
     <title>eSIM Card Scanner</title>
 
-    <!-- QR -->
-    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+
+    <!-- QR CODE SCANNER -->
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+
 
     <!-- OCR -->
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 
-    <!-- Barcode -->
+
+    <!-- BARCODE SCANNER -->
     <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
 
 
@@ -26,137 +31,160 @@
             box-sizing: border-box;
         }
 
+
         body {
             margin: 0;
-            background: #f3f6fa;
-            font-family: Arial, sans-serif;
+            padding: 0;
+            background: #f2f5f9;
+            font-family: Arial, Helvetica, sans-serif;
             color: #172033;
         }
 
+
         .container {
-            width: 96%;
+            width: 95%;
             max-width: 1600px;
-            margin: 25px auto;
+            margin: 30px auto;
         }
+
 
         .header {
             background: #1769d2;
             color: white;
-            padding: 25px;
+            padding: 30px;
             border-radius: 12px 12px 0 0;
         }
 
+
         .header h1 {
-            margin: 0 0 8px;
+            margin: 0 0 10px 0;
+            font-size: 40px;
         }
+
 
         .header p {
             margin: 0;
+            font-size: 20px;
         }
 
-        .card {
+
+        .main {
             background: white;
-            padding: 25px;
+            padding: 30px;
             border-radius: 0 0 12px 12px;
-            box-shadow: 0 5px 25px rgba(0,0,0,.08);
+            box-shadow: 0 5px 25px rgba(0,0,0,0.08);
         }
+
+
+        /* ================================
+           BUTTONS
+        ================================= */
 
         .buttons {
             display: flex;
             flex-wrap: wrap;
-            gap: 10px;
+            gap: 12px;
             margin-bottom: 20px;
         }
 
-        /*
-         * IMPORTANT:
-         * Upload button is a LABEL.
-         * It works without JavaScript.
-         */
 
-        .upload-button,
-        .camera-button,
-        button {
+        .button {
             display: inline-block;
-            padding: 13px 20px;
-            border: 0;
-            border-radius: 7px;
+            padding: 14px 22px;
+            border-radius: 8px;
             background: #1769d2;
             color: white;
-            font-size: 15px;
+            font-size: 16px;
             font-weight: bold;
             cursor: pointer;
+            border: none;
             text-decoration: none;
         }
 
-        .upload-button:hover,
-        .camera-button:hover,
-        button:hover {
-            opacity: .88;
+
+        .button:hover {
+            opacity: 0.88;
         }
 
-        button.secondary {
+
+        .button.gray {
             background: #555;
         }
 
-        button.danger {
+
+        .button.red {
             background: #d93025;
         }
 
-        button:disabled {
-            opacity: .5;
-            cursor: not-allowed;
-        }
 
         /*
-         * Native file inputs are hidden.
-         * LABEL opens them directly.
+         * IMPORTANT:
+         * We are NOT relying on JavaScript to open
+         * the file picker.
          */
 
-        #fileInput,
+        #fileInput {
+            display: none;
+        }
+
+
         #cameraInput {
             display: none;
         }
 
+
+        /* ================================
+           STATUS
+        ================================= */
+
         .status {
+            padding: 16px;
+            border-radius: 8px;
             background: #eef5ff;
-            border: 1px solid #c9ddff;
+            border: 1px solid #c7dcff;
             color: #164b93;
-            padding: 14px;
-            border-radius: 7px;
-            margin-bottom: 20px;
             font-weight: bold;
+            margin-bottom: 25px;
         }
+
+
+        /* ================================
+           SUMMARY
+        ================================= */
 
         .summary {
             display: grid;
             grid-template-columns:
-                repeat(auto-fit, minmax(180px, 1fr));
+                repeat(4, 1fr);
             gap: 15px;
-            margin-bottom: 25px;
+            margin-bottom: 30px;
         }
+
 
         .summary-box {
-            background: #f7f9fc;
+            padding: 20px;
             border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 18px;
+            border-radius: 10px;
+            background: #fafafa;
         }
 
-        .summary-label {
+
+        .summary-title {
+            font-size: 14px;
             color: #666;
-            font-size: 13px;
             margin-bottom: 8px;
         }
 
-        .summary-number {
-            font-size: 25px;
+
+        .summary-value {
+            font-size: 30px;
             font-weight: bold;
         }
 
-        h2 {
-            margin-top: 30px;
-        }
+
+        /* ================================
+           PREVIEW
+        ================================= */
 
         .preview-grid {
             display: grid;
@@ -165,6 +193,7 @@
             gap: 20px;
         }
 
+
         .preview-card {
             border: 1px solid #ddd;
             border-radius: 10px;
@@ -172,102 +201,177 @@
             background: #fafafa;
         }
 
+
         .preview-card h3 {
             margin-top: 0;
             word-break: break-word;
         }
 
+
         .preview-card img {
             width: 100%;
-            max-height: 650px;
+            max-height: 700px;
             object-fit: contain;
+            border-radius: 8px;
             background: #eee;
-            border-radius: 6px;
         }
 
+
+        /* ================================
+           RESULTS
+        ================================= */
+
         .table-wrapper {
+            width: 100%;
             overflow-x: auto;
         }
 
+
         table {
             width: 100%;
-            min-width: 950px;
+            min-width: 1000px;
             border-collapse: collapse;
         }
+
 
         th {
             background: #1769d2;
             color: white;
-            padding: 13px;
+            padding: 14px;
             text-align: left;
         }
 
+
         td {
             border: 1px solid #ddd;
-            padding: 13px;
+            padding: 14px;
             vertical-align: top;
             word-break: break-word;
         }
+
 
         tr:nth-child(even) {
             background: #f8f8f8;
         }
 
+
+        .found {
+            color: #16803c;
+            font-weight: bold;
+        }
+
+
+        .not-found {
+            color: #d93025;
+            font-weight: bold;
+        }
+
+
+        /* ================================
+           OCR
+        ================================= */
+
         .ocr-box {
-            background: #fafafa;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 15px;
+            background: #111;
+            color: #00ff66;
+            padding: 20px;
             min-height: 250px;
+            border-radius: 8px;
             white-space: pre-wrap;
             font-family: Consolas, monospace;
             overflow-x: auto;
         }
 
+
+        /* ================================
+           INFO
+        ================================= */
+
         .info {
-            margin-top: 25px;
-            padding: 15px;
+            margin-top: 30px;
+            padding: 18px;
+            border-radius: 8px;
             background: #fff8e1;
             border: 1px solid #ffe082;
-            border-radius: 8px;
-            line-height: 1.6;
+            line-height: 1.7;
         }
 
-        @media (max-width: 700px) {
+
+        /* ================================
+           MOBILE
+        ================================= */
+
+        @media (max-width: 800px) {
 
             .container {
                 width: 100%;
                 margin: 0;
             }
 
+
             .header {
                 border-radius: 0;
+                padding: 20px;
             }
 
-            .card {
+
+            .header h1 {
+                font-size: 30px;
+            }
+
+
+            .header p {
+                font-size: 16px;
+            }
+
+
+            .main {
                 border-radius: 0;
                 padding: 15px;
             }
 
-            .upload-button,
-            .camera-button,
-            button {
-                width: 100%;
-                text-align: center;
-            }
 
             .buttons {
                 flex-direction: column;
             }
+
+
+            .button {
+                width: 100%;
+                text-align: center;
+            }
+
+
+            .summary {
+                grid-template-columns:
+                    repeat(2, 1fr);
+            }
+
+        }
+
+
+        @media (max-width: 500px) {
+
+            .summary {
+                grid-template-columns: 1fr;
+            }
+
         }
 
     </style>
+
 </head>
 
 
 <body>
 
+
 <div class="container">
+
+
+    <!-- ==========================================
+         HEADER
+    =========================================== -->
 
     <div class="header">
 
@@ -282,24 +386,25 @@
     </div>
 
 
-    <div class="card">
+
+    <div class="main">
 
 
-        <!-- ================================================= -->
-        <!-- BUTTONS -->
-        <!-- ================================================= -->
+        <!-- ==========================================
+             BUTTONS
+        =========================================== -->
 
         <div class="buttons">
 
+
             <!--
                 IMPORTANT:
-                This is a LABEL, not a JavaScript button.
-                Clicking it directly opens the file picker.
+                This label directly opens the file picker.
             -->
 
             <label
                 for="fileInput"
-                class="upload-button"
+                class="button"
             >
                 📁 Upload Photo
             </label>
@@ -307,91 +412,97 @@
 
             <label
                 for="cameraInput"
-                class="camera-button"
+                class="button"
             >
                 📷 Take Photo
             </label>
 
 
             <button
-                type="button"
                 id="scanButton"
+                class="button"
+                type="button"
             >
                 🔍 Scan Again
             </button>
 
 
             <button
-                type="button"
                 id="exportButton"
-                class="secondary"
+                class="button gray"
+                type="button"
             >
                 📊 Export CSV
             </button>
 
 
             <button
-                type="button"
                 id="clearButton"
-                class="danger"
+                class="button red"
+                type="button"
             >
                 🗑 Clear
             </button>
 
+
         </div>
 
 
-        <!-- ================================================= -->
-        <!-- FILE INPUT -->
-        <!-- ================================================= -->
+
+        <!-- ==========================================
+             FILE INPUT
+        =========================================== -->
 
         <input
-            type="file"
             id="fileInput"
+            type="file"
             accept="image/*"
             multiple
         >
 
 
-        <!-- ================================================= -->
-        <!-- CAMERA INPUT -->
-        <!-- ================================================= -->
+        <!-- ==========================================
+             CAMERA INPUT
+        =========================================== -->
 
         <input
-            type="file"
             id="cameraInput"
+            type="file"
             accept="image/*"
             capture="environment"
         >
 
 
-        <!-- ================================================= -->
-        <!-- STATUS -->
-        <!-- ================================================= -->
+
+        <!-- ==========================================
+             STATUS
+        =========================================== -->
 
         <div
             id="status"
             class="status"
         >
-            Ready. Click Upload Photo.
+            Loading JavaScript...
         </div>
 
 
-        <!-- ================================================= -->
-        <!-- SUMMARY -->
-        <!-- ================================================= -->
+
+        <!-- ==========================================
+             SUMMARY
+        =========================================== -->
 
         <div class="summary">
 
+
             <div class="summary-box">
 
-                <div class="summary-label">
+                <div class="summary-title">
                     Photos
                 </div>
 
                 <div
                     id="photoCount"
-                    class="summary-number"
+                    class="summary-value"
                 >
                     0
                 </div>
@@ -399,15 +510,16 @@
             </div>
 
 
+
             <div class="summary-box">
 
-                <div class="summary-label">
+                <div class="summary-title">
                     ICCID
                 </div>
 
                 <div
                     id="iccidCount"
-                    class="summary-number"
+                    class="summary-value"
                 >
                     0
                 </div>
@@ -415,15 +527,16 @@
             </div>
 
 
+
             <div class="summary-box">
 
-                <div class="summary-label">
+                <div class="summary-title">
                     LPA / QR
                 </div>
 
                 <div
                     id="lpaCount"
-                    class="summary-number"
+                    class="summary-value"
                 >
                     0
                 </div>
@@ -431,31 +544,35 @@
             </div>
 
 
+
             <div class="summary-box">
 
-                <div class="summary-label">
+                <div class="summary-title">
                     PIN + PUK
                 </div>
 
                 <div
                     id="pinPukCount"
-                    class="summary-number"
+                    class="summary-value"
                 >
                     0
                 </div>
 
             </div>
 
+
         </div>
 
 
-        <!-- ================================================= -->
-        <!-- PREVIEW -->
-        <!-- ================================================= -->
+
+        <!-- ==========================================
+             PHOTO PREVIEW
+        =========================================== -->
 
         <h2>
             Photo Preview
         </h2>
+
 
         <div
             id="previewGrid"
@@ -464,13 +581,15 @@
         </div>
 
 
-        <!-- ================================================= -->
-        <!-- RESULTS -->
-        <!-- ================================================= -->
+
+        <!-- ==========================================
+             RESULTS
+        =========================================== -->
 
         <h2>
             Scan Results
         </h2>
+
 
         <div class="table-wrapper">
 
@@ -480,19 +599,33 @@
 
                     <tr>
 
-                        <th>#</th>
+                        <th>
+                            #
+                        </th>
 
-                        <th>Photo</th>
+                        <th>
+                            Photo
+                        </th>
 
-                        <th>ICCID</th>
+                        <th>
+                            ICCID
+                        </th>
 
-                        <th>QR / LPA</th>
+                        <th>
+                            QR / LPA
+                        </th>
 
-                        <th>PIN</th>
+                        <th>
+                            PIN
+                        </th>
 
-                        <th>PUK</th>
+                        <th>
+                            PUK
+                        </th>
 
-                        <th>Confidence</th>
+                        <th>
+                            Confidence
+                        </th>
 
                     </tr>
 
@@ -516,13 +649,15 @@
         </div>
 
 
-        <!-- ================================================= -->
-        <!-- OCR -->
-        <!-- ================================================= -->
+
+        <!-- ==========================================
+             OCR
+        =========================================== -->
 
         <h2>
-            OCR Text
+            Raw OCR Text
         </h2>
+
 
         <div
             id="rawOcr"
@@ -532,49 +667,57 @@
         </div>
 
 
-        <!-- ================================================= -->
-        <!-- INFORMATION -->
-        <!-- ================================================= -->
+
+        <!-- ==========================================
+             INFORMATION
+        =========================================== -->
 
         <div class="info">
 
             <strong>
-                Scanner:
+                How it works
             </strong>
 
             <br>
 
-            • QR code → LPA / activation data
+            1. Upload or take a photo of the eSIM card.
 
             <br>
 
-            • Barcode → ICCID
+            2. QR code is scanned for LPA / activation data.
 
             <br>
 
-            • OCR → PIN
+            3. Barcode is scanned for ICCID.
 
             <br>
 
-            • OCR → PUK
+            4. OCR reads PIN and PUK.
 
-            <br><br>
+            <br>
 
-            Everything is processed in the browser.
+            5. Results are shown in the table.
+
+            <br>
+
+            6. Results can be exported to CSV.
 
         </div>
+
 
     </div>
 
 </div>
 
 
-<!-- ========================================================= -->
-<!-- JAVASCRIPT -->
-<!-- ========================================================= -->
+
+<!-- ==============================================
+     YOUR JAVASCRIPT
+================================================ -->
 
 <script src="./code.js"></script>
 
 
 </body>
+
 </html>

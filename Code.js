@@ -2,8 +2,7 @@
 
 
 /* ============================================================
-   eSIM SCANNER
-   ICCID + LPA + PIN + PUK
+   eSIM CARD SCANNER
    ============================================================ */
 
 
@@ -12,76 +11,124 @@ document.addEventListener(
     function () {
 
 
+        console.log(
+            "================================="
+        );
+
+        console.log(
+            "eSIM SCANNER: code.js loaded"
+        );
+
+        console.log(
+            "================================="
+        );
+
+
         /* ======================================================
-           ELEMENTS
-           ====================================================== */
+           GET HTML ELEMENTS
+        ====================================================== */
 
         const fileInput =
-            document.getElementById("fileInput");
+            document.getElementById(
+                "fileInput"
+            );
+
 
         const cameraInput =
-            document.getElementById("cameraInput");
+            document.getElementById(
+                "cameraInput"
+            );
+
 
         const scanButton =
-            document.getElementById("scanButton");
+            document.getElementById(
+                "scanButton"
+            );
+
 
         const exportButton =
-            document.getElementById("exportButton");
+            document.getElementById(
+                "exportButton"
+            );
+
 
         const clearButton =
-            document.getElementById("clearButton");
+            document.getElementById(
+                "clearButton"
+            );
 
-        const statusBox =
-            document.getElementById("status");
+
+        const status =
+            document.getElementById(
+                "status"
+            );
+
 
         const previewGrid =
-            document.getElementById("previewGrid");
+            document.getElementById(
+                "previewGrid"
+            );
+
 
         const resultsBody =
-            document.getElementById("resultsBody");
+            document.getElementById(
+                "resultsBody"
+            );
 
-        const rawOcrBox =
-            document.getElementById("rawOcr");
+
+        const rawOcr =
+            document.getElementById(
+                "rawOcr"
+            );
+
 
         const photoCount =
-            document.getElementById("photoCount");
+            document.getElementById(
+                "photoCount"
+            );
+
 
         const iccidCount =
-            document.getElementById("iccidCount");
+            document.getElementById(
+                "iccidCount"
+            );
+
 
         const lpaCount =
-            document.getElementById("lpaCount");
+            document.getElementById(
+                "lpaCount"
+            );
+
 
         const pinPukCount =
-            document.getElementById("pinPukCount");
+            document.getElementById(
+                "pinPukCount"
+            );
 
 
         /* ======================================================
            VARIABLES
-           ====================================================== */
+        ====================================================== */
 
         let selectedFiles = [];
 
         let results = [];
-
-        let qrReader = null;
-
-        let barcodeReader = null;
 
         let ocrWorker = null;
 
 
         /* ======================================================
            STATUS
-           ====================================================== */
+        ====================================================== */
 
-        function status(message) {
+        function setStatus(message) {
 
-            statusBox.textContent =
+            status.textContent =
                 message;
 
+
             console.log(
-                "[eSIM]",
+                "[STATUS]",
                 message
             );
 
@@ -89,39 +136,50 @@ document.addEventListener(
 
 
         /* ======================================================
-           VERIFY LIBRARIES
-           ====================================================== */
+           CHECK LIBRARIES
+        ====================================================== */
 
-        function verifyLibraries() {
+        console.log(
+            "jsQR:",
+            typeof window.jsQR
+        );
 
-            console.log(
-                "jsQR:",
-                typeof window.jsQR
-            );
 
-            console.log(
-                "Tesseract:",
-                typeof window.Tesseract
-            );
+        console.log(
+            "Tesseract:",
+            typeof window.Tesseract
+        );
 
-            console.log(
-                "ZXing:",
-                typeof window.ZXing
-            );
 
-        }
+        console.log(
+            "ZXing:",
+            typeof window.ZXing
+        );
+
+
+        setStatus(
+            "JavaScript loaded successfully. Ready to upload."
+        );
 
 
         /* ======================================================
-           FILE INPUT
-           ====================================================== */
+           FILE SELECTED
+        ====================================================== */
 
         fileInput.addEventListener(
             "change",
             async function (event) {
 
                 console.log(
-                    "FILE SELECTED"
+                    "================================="
+                );
+
+                console.log(
+                    "FILE INPUT CHANGE"
+                );
+
+                console.log(
+                    "================================="
                 );
 
 
@@ -131,11 +189,17 @@ document.addEventListener(
                     );
 
 
+                console.log(
+                    "Selected files:",
+                    files
+                );
+
+
                 if (
                     files.length === 0
                 ) {
 
-                    status(
+                    setStatus(
                         "No photo selected."
                     );
 
@@ -148,25 +212,39 @@ document.addEventListener(
                     files;
 
 
-                console.log(
-                    "Files:",
-                    selectedFiles
+                /*
+                 * SHOW PHOTO IMMEDIATELY.
+                 *
+                 * This happens BEFORE OCR.
+                 */
+
+                showPreviews();
+
+
+                setStatus(
+                    files.length +
+                    " photo(s) selected. Starting scan..."
                 );
 
 
-                await startScan();
+                await startScanning();
 
             }
         );
 
 
         /* ======================================================
-           CAMERA INPUT
-           ====================================================== */
+           CAMERA SELECTED
+        ====================================================== */
 
         cameraInput.addEventListener(
             "change",
             async function (event) {
+
+                console.log(
+                    "CAMERA INPUT CHANGE"
+                );
+
 
                 const files =
                     Array.from(
@@ -187,22 +265,112 @@ document.addEventListener(
                     files;
 
 
-                await startScan();
+                showPreviews();
+
+
+                await startScanning();
 
             }
         );
 
 
         /* ======================================================
+           SHOW PREVIEWS
+        ====================================================== */
+
+        function showPreviews() {
+
+            previewGrid.innerHTML =
+                "";
+
+
+            selectedFiles.forEach(
+                function (file, index) {
+
+                    const card =
+                        document.createElement(
+                            "div"
+                        );
+
+
+                    card.className =
+                        "preview-card";
+
+
+                    const title =
+                        document.createElement(
+                            "h3"
+                        );
+
+
+                    title.textContent =
+                        (
+                            index + 1
+                        ) +
+                        ". " +
+                        file.name;
+
+
+                    const image =
+                        document.createElement(
+                            "img"
+                        );
+
+
+                    const objectUrl =
+                        URL.createObjectURL(
+                            file
+                        );
+
+
+                    image.src =
+                        objectUrl;
+
+
+                    image.onload =
+                        function () {
+
+                            URL.revokeObjectURL(
+                                objectUrl
+                            );
+
+                        };
+
+
+                    card.appendChild(
+                        title
+                    );
+
+
+                    card.appendChild(
+                        image
+                    );
+
+
+                    previewGrid.appendChild(
+                        card
+                    );
+
+                }
+            );
+
+
+            photoCount.textContent =
+                selectedFiles.length;
+
+        }
+
+
+        /* ======================================================
            LOAD IMAGE
-           ====================================================== */
+        ====================================================== */
 
         function loadImage(file) {
 
             return new Promise(
                 function (resolve, reject) {
 
-                    const img =
+                    const image =
                         new Image();
 
 
@@ -212,35 +380,39 @@ document.addEventListener(
                         );
 
 
-                    img.onload =
+                    image.onload =
                         function () {
 
                             URL.revokeObjectURL(
                                 url
                             );
 
-                            resolve(img);
+
+                            resolve(
+                                image
+                            );
 
                         };
 
 
-                    img.onerror =
+                    image.onerror =
                         function () {
 
                             URL.revokeObjectURL(
                                 url
                             );
 
+
                             reject(
                                 new Error(
-                                    "Cannot open image"
+                                    "Could not load image."
                                 )
                             );
 
                         };
 
 
-                    img.src =
+                    image.src =
                         url;
 
                 }
@@ -250,84 +422,89 @@ document.addEventListener(
 
 
         /* ======================================================
-           CANVAS
-           ====================================================== */
+           CREATE CANVAS
+        ====================================================== */
 
         function createCanvas(
             image,
-            crop,
-            mode
+            crop
         ) {
 
-            const iw =
-                image.naturalWidth;
-
-            const ih =
-                image.naturalHeight;
+            const width =
+                image.naturalWidth ||
+                image.width;
 
 
-            let sx = 0;
+            const height =
+                image.naturalHeight ||
+                image.height;
 
-            let sy = 0;
 
-            let sw = iw;
+            let x =
+                0;
 
-            let sh = ih;
+
+            let y =
+                0;
+
+
+            let w =
+                width;
+
+
+            let h =
+                height;
 
 
             if (
                 crop
             ) {
 
-                sx =
+                x =
                     Math.floor(
-                        iw * crop.x
+                        width *
+                        crop.x
                     );
 
-                sy =
+
+                y =
                     Math.floor(
-                        ih * crop.y
+                        height *
+                        crop.y
                     );
 
-                sw =
+
+                w =
                     Math.floor(
-                        iw * crop.width
+                        width *
+                        crop.width
                     );
 
-                sh =
+
+                h =
                     Math.floor(
-                        ih * crop.height
+                        height *
+                        crop.height
                     );
 
             }
 
 
-            const maxSize =
+            /*
+             * Limit canvas size.
+             */
+
+            const max =
                 3000;
 
 
             const scale =
                 Math.min(
                     1,
-                    maxSize /
-                    Math.max(sw, sh)
-                );
-
-
-            const width =
-                Math.max(
-                    1,
-                    Math.floor(
-                        sw * scale
-                    )
-                );
-
-
-            const height =
-                Math.max(
-                    1,
-                    Math.floor(
-                        sh * scale
+                    max /
+                    Math.max(
+                        w,
+                        h
                     )
                 );
 
@@ -339,13 +516,26 @@ document.addEventListener(
 
 
             canvas.width =
-                width;
+                Math.max(
+                    1,
+                    Math.floor(
+                        w *
+                        scale
+                    )
+                );
+
 
             canvas.height =
-                height;
+                Math.max(
+                    1,
+                    Math.floor(
+                        h *
+                        scale
+                    )
+                );
 
 
-            const ctx =
+            const context =
                 canvas.getContext(
                     "2d",
                     {
@@ -355,81 +545,17 @@ document.addEventListener(
                 );
 
 
-            ctx.drawImage(
+            context.drawImage(
                 image,
-                sx,
-                sy,
-                sw,
-                sh,
+                x,
+                y,
+                w,
+                h,
                 0,
                 0,
-                width,
-                height
+                canvas.width,
+                canvas.height
             );
-
-
-            if (
-                mode === "gray" ||
-                mode === "threshold"
-            ) {
-
-                const data =
-                    ctx.getImageData(
-                        0,
-                        0,
-                        width,
-                        height
-                    );
-
-
-                for (
-                    let i = 0;
-                    i < data.data.length;
-                    i += 4
-                ) {
-
-                    let value =
-                        0.299 *
-                        data.data[i] +
-
-                        0.587 *
-                        data.data[i + 1] +
-
-                        0.114 *
-                        data.data[i + 2];
-
-
-                    if (
-                        mode === "threshold"
-                    ) {
-
-                        value =
-                            value > 145
-                                ? 255
-                                : 0;
-
-                    }
-
-
-                    data.data[i] =
-                        value;
-
-                    data.data[i + 1] =
-                        value;
-
-                    data.data[i + 2] =
-                        value;
-
-                }
-
-
-                ctx.putImageData(
-                    data,
-                    0,
-                    0
-                );
-
-            }
 
 
             return canvas;
@@ -438,105 +564,19 @@ document.addEventListener(
 
 
         /* ======================================================
-           AREAS
-           ====================================================== */
+           QR SCAN
+        ====================================================== */
 
-        const FULL =
-        {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1
-        };
-
-
-        const QR_AREAS = [
-
-            FULL,
-
-            {
-                x: 0.30,
-                y: 0,
-                width: 0.70,
-                height: 0.80
-            },
-
-            {
-                x: 0.40,
-                y: 0,
-                width: 0.60,
-                height: 0.70
-            },
-
-            {
-                x: 0.20,
-                y: 0,
-                width: 0.80,
-                height: 0.90
-            }
-
-        ];
-
-
-        const BARCODE_AREAS = [
-
-            {
-                x: 0,
-                y: 0.40,
-                width: 1,
-                height: 0.60
-            },
-
-            {
-                x: 0.10,
-                y: 0.50,
-                width: 0.90,
-                height: 0.50
-            },
-
-            {
-                x: 0,
-                y: 0.55,
-                width: 0.80,
-                height: 0.45
-            },
-
-            FULL
-
-        ];
-
-
-        const OCR_AREAS = [
-
-            {
-                x: 0,
-                y: 0,
-                width: 0.75,
-                height: 0.55
-            },
-
-            {
-                x: 0,
-                y: 0,
-                width: 0.85,
-                height: 0.70
-            },
-
-            FULL
-
-        ];
-
-
-        /* ======================================================
-           QR WITH jsQR
-           ====================================================== */
-
-        function jsQRScan(canvas) {
+        function scanQRCanvas(canvas) {
 
             if (
                 typeof window.jsQR !==
                 "function"
             ) {
+
+                console.log(
+                    "jsQR is not available."
+                );
 
                 return "";
 
@@ -545,7 +585,7 @@ document.addEventListener(
 
             try {
 
-                const ctx =
+                const context =
                     canvas.getContext(
                         "2d",
                         {
@@ -556,7 +596,7 @@ document.addEventListener(
 
 
                 const imageData =
-                    ctx.getImageData(
+                    context.getImageData(
                         0,
                         0,
                         canvas.width,
@@ -564,7 +604,7 @@ document.addEventListener(
                     );
 
 
-                const result =
+                const code =
                     window.jsQR(
                         imageData.data,
                         imageData.width,
@@ -577,19 +617,25 @@ document.addEventListener(
 
 
                 if (
-                    result &&
-                    result.data
+                    code &&
+                    code.data
                 ) {
 
-                    return result.data;
+                    console.log(
+                        "QR FOUND:",
+                        code.data
+                    );
+
+
+                    return code.data;
 
                 }
 
             }
             catch (error) {
 
-                console.log(
-                    "jsQR error:",
+                console.error(
+                    "QR error:",
                     error
                 );
 
@@ -602,88 +648,71 @@ document.addEventListener(
 
 
         /* ======================================================
-           QR
-           ====================================================== */
+           QR SCAN
+        ====================================================== */
 
         async function scanQR(image) {
 
-            status(
+            setStatus(
                 "Scanning QR code..."
             );
 
 
+            const areas = [
+
+                {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1
+                },
+
+                {
+                    x: 0.25,
+                    y: 0,
+                    width: 0.75,
+                    height: 0.8
+                },
+
+                {
+                    x: 0,
+                    y: 0,
+                    width: 0.8,
+                    height: 0.8
+                },
+
+                {
+                    x: 0.2,
+                    y: 0.1,
+                    width: 0.8,
+                    height: 0.8
+                }
+
+            ];
+
+
             for (
-                const area of QR_AREAS
+                const area of areas
             ) {
 
-                for (
-                    const mode of [
-                        "normal",
-                        "gray",
-                        "threshold"
-                    ]
+                const canvas =
+                    createCanvas(
+                        image,
+                        area
+                    );
+
+
+                const result =
+                    scanQRCanvas(
+                        canvas
+                    );
+
+
+                if (
+                    result
                 ) {
 
-                    const canvas =
-                        createCanvas(
-                            image,
-                            area,
-                            mode
-                        );
-
-
-                    /*
-                     * First try jsQR.
-                     */
-
-                    const qr =
-                        jsQRScan(
-                            canvas
-                        );
-
-
-                    if (
-                        qr
-                    ) {
-
-                        console.log(
-                            "QR FOUND:",
-                            qr
-                        );
-
-                        return qr;
-
-                    }
-
-
-                    /*
-                     * Then try ZXing.
-                     */
-
-                    if (
-                        qrReader
-                    ) {
-
-                        try {
-
-                            const result =
-                                await qrReader.decodeFromCanvas(
-                                    canvas
-                                );
-
-
-                            if (
-                                result
-                            ) {
-
-                                return result.getText();
-
-                            }
-
-                        }
-                        catch (_) {}
-
-                    }
+                    return result;
 
                 }
 
@@ -696,49 +725,85 @@ document.addEventListener(
 
 
         /* ======================================================
-           BARCODE
-           ====================================================== */
+           BARCODE SCAN
+        ====================================================== */
 
         async function scanBarcode(image) {
 
-            status(
+            setStatus(
                 "Scanning ICCID barcode..."
             );
 
 
             if (
-                !barcodeReader
+                typeof window.ZXing ===
+                "undefined"
             ) {
+
+                console.log(
+                    "ZXing unavailable."
+                );
+
 
                 return "";
 
             }
 
 
-            for (
-                const area of BARCODE_AREAS
-            ) {
+            try {
+
+                const reader =
+                    new window.ZXing.BrowserMultiFormatReader();
+
+
+                const areas = [
+
+                    {
+                        x: 0,
+                        y: 0.35,
+                        width: 1,
+                        height: 0.65
+                    },
+
+                    {
+                        x: 0,
+                        y: 0.5,
+                        width: 1,
+                        height: 0.5
+                    },
+
+                    {
+                        x: 0.1,
+                        y: 0.4,
+                        width: 0.9,
+                        height: 0.6
+                    },
+
+                    {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1
+                    }
+
+                ];
+
 
                 for (
-                    const mode of [
-                        "normal",
-                        "gray",
-                        "threshold"
-                    ]
+                    const area of areas
                 ) {
 
                     const canvas =
                         createCanvas(
                             image,
-                            area,
-                            mode
+                            area
                         );
 
 
                     try {
 
                         const result =
-                            await barcodeReader.decodeFromCanvas(
+                            await reader.decodeFromCanvas(
                                 canvas
                             );
 
@@ -752,7 +817,7 @@ document.addEventListener(
 
 
                             console.log(
-                                "BARCODE:",
+                                "BARCODE FOUND:",
                                 text
                             );
 
@@ -763,6 +828,11 @@ document.addEventListener(
                                     ""
                                 );
 
+
+                            /*
+                             * ICCID normally has
+                             * around 19-20 digits.
+                             */
 
                             if (
                                 digits.length >= 18 &&
@@ -776,9 +846,24 @@ document.addEventListener(
                         }
 
                     }
-                    catch (_) {}
+                    catch (error) {
+
+                        /*
+                         * Continue with
+                         * another crop.
+                         */
+
+                    }
 
                 }
+
+            }
+            catch (error) {
+
+                console.error(
+                    "Barcode scanner error:",
+                    error
+                );
 
             }
 
@@ -790,9 +875,9 @@ document.addEventListener(
 
         /* ======================================================
            OCR WORKER
-           ====================================================== */
+        ====================================================== */
 
-        async function getOCR() {
+        async function getOCRWorker() {
 
             if (
                 ocrWorker
@@ -815,8 +900,8 @@ document.addEventListener(
             }
 
 
-            status(
-                "Loading OCR..."
+            setStatus(
+                "Loading OCR engine..."
             );
 
 
@@ -826,26 +911,25 @@ document.addEventListener(
                     1,
                     {
                         logger:
-                            function (m) {
+                            function (message) {
 
                                 if (
-                                    m &&
-                                    m.status ===
+                                    message.status ===
                                     "recognizing text"
                                 ) {
 
                                     const percent =
                                         Math.round(
                                             (
-                                                m.progress ||
+                                                message.progress ||
                                                 0
                                             ) *
                                             100
                                         );
 
 
-                                    status(
-                                        "OCR: " +
+                                    setStatus(
+                                        "Reading card text: " +
                                         percent +
                                         "%"
                                     );
@@ -870,7 +954,14 @@ document.addEventListener(
                 );
 
             }
-            catch (_) {}
+            catch (error) {
+
+                console.log(
+                    "OCR parameter warning:",
+                    error
+                );
+
+            }
 
 
             return ocrWorker;
@@ -879,13 +970,13 @@ document.addEventListener(
 
 
         /* ======================================================
-           OCR
-           ====================================================== */
+           OCR IMAGE
+        ====================================================== */
 
-        async function OCR(canvas) {
+        async function runOCR(canvas) {
 
             const worker =
-                await getOCR();
+                await getOCRWorker();
 
 
             const result =
@@ -894,48 +985,47 @@ document.addEventListener(
                 );
 
 
-            return (
+            if (
                 result &&
-                result.data &&
-                result.data.text
-            )
-                ? result.data.text
-                : "";
+                result.data
+            ) {
+
+                return result.data.text ||
+                    "";
+
+            }
+
+
+            return "";
 
         }
 
 
         /* ======================================================
-           NORMALIZE
-           ====================================================== */
-
-        function normalize(text) {
-
-            return String(
-                text || ""
-            )
-                .replace(
-                    /\|/g,
-                    "I"
-                )
-                .replace(
-                    /\r/g,
-                    ""
-                );
-
-        }
-
-
-        /* ======================================================
-           PIN
-           ====================================================== */
+           FIND PIN
+        ====================================================== */
 
         function findPIN(text) {
 
-            const t =
-                normalize(
-                    text
-                );
+            if (
+                !text
+            ) {
+
+                return "";
+
+            }
+
+
+            const clean =
+                text
+                    .replace(
+                        /\r/g,
+                        ""
+                    )
+                    .replace(
+                        /\|/g,
+                        "I"
+                    );
 
 
             const patterns = [
@@ -944,7 +1034,7 @@ document.addEventListener(
 
                 /P\s*I\s*N\s*[:\-]?\s*(\d{4})/i,
 
-                /P\s*1\s*N\s*[:\-]?\s*(\d{4})/i,
+                /P1N\s*[:\-]?\s*(\d{4})/i,
 
                 /P\s*IN\s*[:\-]?\s*(\d{4})/i
 
@@ -956,7 +1046,7 @@ document.addEventListener(
             ) {
 
                 const match =
-                    t.match(
+                    clean.match(
                         pattern
                     );
 
@@ -978,15 +1068,30 @@ document.addEventListener(
 
 
         /* ======================================================
-           PUK
-           ====================================================== */
+           FIND PUK
+        ====================================================== */
 
         function findPUK(text) {
 
-            const t =
-                normalize(
-                    text
-                );
+            if (
+                !text
+            ) {
+
+                return "";
+
+            }
+
+
+            const clean =
+                text
+                    .replace(
+                        /\r/g,
+                        ""
+                    )
+                    .replace(
+                        /\|/g,
+                        "I"
+                    );
 
 
             const patterns = [
@@ -1007,7 +1112,7 @@ document.addEventListener(
             ) {
 
                 const match =
-                    t.match(
+                    clean.match(
                         pattern
                     );
 
@@ -1041,19 +1146,26 @@ document.addEventListener(
 
 
         /* ======================================================
-           ICCID OCR FALLBACK
-           ====================================================== */
+           FIND ICCID FROM OCR
+        ====================================================== */
 
         function findICCID(text) {
 
-            let t =
-                String(
-                    text || ""
-                );
+            if (
+                !text
+            ) {
+
+                return "";
+
+            }
 
 
-            t =
-                t
+            let clean =
+                text;
+
+
+            clean =
+                clean
                     .replace(
                         /O/g,
                         "0"
@@ -1076,12 +1188,8 @@ document.addEventListener(
                     );
 
 
-            /*
-             * ICCID starts with 89.
-             */
-
             const matches =
-                t.match(
+                clean.match(
                     /89\d{16,20}/g
                 );
 
@@ -1090,6 +1198,11 @@ document.addEventListener(
                 matches &&
                 matches.length
             ) {
+
+                /*
+                 * Prefer the first ICCID-like
+                 * number starting with 89.
+                 */
 
                 return matches[0];
 
@@ -1102,20 +1215,34 @@ document.addEventListener(
 
 
         /* ======================================================
-           LPA OCR FALLBACK
-           ====================================================== */
+           FIND LPA FROM OCR
+        ====================================================== */
 
         function findLPA(text) {
 
-            const t =
-                String(
-                    text || ""
+            if (
+                !text
+            ) {
+
+                return "";
+
+            }
+
+
+            const clean =
+                text.replace(
+                    /\s+/g,
+                    ""
                 );
 
 
+            /*
+             * Common LPA format.
+             */
+
             const lpa =
-                t.match(
-                    /LPA\s*[:\-]?\s*[^\s]+/i
+                clean.match(
+                    /LPA:[^,\s]+/i
                 );
 
 
@@ -1123,17 +1250,17 @@ document.addEventListener(
                 lpa
             ) {
 
-                return lpa[0]
-                    .replace(
-                        /\s+/g,
-                        ""
-                    );
+                return lpa[0];
 
             }
 
 
+            /*
+             * Another common activation format.
+             */
+
             const activation =
-                t.match(
+                clean.match(
                     /1\$[A-Za-z0-9._:+\/=-]+\$[A-Za-z0-9._:+\/=-]+/
                 );
 
@@ -1153,319 +1280,112 @@ document.addEventListener(
 
 
         /* ======================================================
-           OCR PIN / PUK
-           ====================================================== */
+           OCR FULL CARD
+        ====================================================== */
 
-        async function scanPINPUK(image) {
+        async function scanCardText(image) {
 
-            let bestText = "";
-
-            let pin = "";
-
-            let puk = "";
-
-
-            for (
-                const area of OCR_AREAS
-            ) {
-
-                for (
-                    const mode of [
-                        "normal",
-                        "gray",
-                        "threshold"
-                    ]
-                ) {
-
-                    const canvas =
-                        createCanvas(
-                            image,
-                            area,
-                            mode
-                        );
-
-
-                    const text =
-                        await OCR(
-                            canvas
-                        );
-
-
-                    if (
-                        text.length >
-                        bestText.length
-                    ) {
-
-                        bestText =
-                            text;
-
-                    }
-
-
-                    const currentPIN =
-                        findPIN(
-                            text
-                        );
-
-
-                    const currentPUK =
-                        findPUK(
-                            text
-                        );
-
-
-                    if (
-                        currentPIN
-                    ) {
-
-                        pin =
-                            currentPIN;
-
-                    }
-
-
-                    if (
-                        currentPUK
-                    ) {
-
-                        puk =
-                            currentPUK;
-
-                    }
-
-
-                    if (
-                        pin &&
-                        puk
-                    ) {
-
-                        return {
-
-                            pin:
-                                pin,
-
-                            puk:
-                                puk,
-
-                            text:
-                                bestText
-
-                        };
-
-                    }
-
-                }
-
-            }
-
-
-            return {
-
-                pin:
-                    pin,
-
-                puk:
-                    puk,
-
-                text:
-                    bestText
-
-            };
-
-        }
-
-
-        /* ======================================================
-           PREVIEW
-           ====================================================== */
-
-        function preview(file) {
-
-            const box =
-                document.createElement(
-                    "div"
-                );
-
-
-            box.className =
-                "preview-card";
-
-
-            const title =
-                document.createElement(
-                    "h3"
-                );
-
-
-            title.textContent =
-                file.name;
-
-
-            const img =
-                document.createElement(
-                    "img"
-                );
-
-
-            const url =
-                URL.createObjectURL(
-                    file
-                );
-
-
-            img.src =
-                url;
-
-
-            box.appendChild(
-                title
-            );
-
-
-            box.appendChild(
-                img
-            );
-
-
-            previewGrid.appendChild(
-                box
-            );
-
-        }
-
-
-        /* ======================================================
-           DISPLAY RESULTS
-           ====================================================== */
-
-        function displayResults() {
-
-            resultsBody.innerHTML =
+            let allText =
                 "";
 
 
-            if (
-                results.length === 0
+            const areas = [
+
+                {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1
+                },
+
+                {
+                    x: 0,
+                    y: 0,
+                    width: 0.8,
+                    height: 0.7
+                },
+
+                {
+                    x: 0,
+                    y: 0.25,
+                    width: 1,
+                    height: 0.75
+                }
+
+            ];
+
+
+            for (
+                const area of areas
             ) {
 
-                resultsBody.innerHTML = `
-                    <tr>
-                        <td colspan="7">
-                            No results yet.
-                        </td>
-                    </tr>
-                `;
+                const canvas =
+                    createCanvas(
+                        image,
+                        area
+                    );
 
-                updateSummary();
 
-                return;
+                const text =
+                    await runOCR(
+                        canvas
+                    );
+
+
+                if (
+                    text
+                ) {
+
+                    allText +=
+                        "\n\n" +
+                        text;
+
+                }
+
+
+                /*
+                 * If PIN and PUK are already
+                 * found, we don't need to
+                 * perform all OCR crops.
+                 */
+
+                const pin =
+                    findPIN(
+                        allText
+                    );
+
+
+                const puk =
+                    findPUK(
+                        allText
+                    );
+
+
+                if (
+                    pin &&
+                    puk
+                ) {
+
+                    break;
+
+                }
 
             }
 
 
-            results.forEach(
-                function (item, index) {
-
-                    const row =
-                        document.createElement(
-                            "tr"
-                        );
-
-
-                    const values = [
-
-                        index + 1,
-
-                        item.file,
-
-                        item.iccid,
-
-                        item.lpa,
-
-                        item.pin,
-
-                        item.puk,
-
-                        item.confidence
-
-                    ];
-
-
-                    values.forEach(
-                        function (value) {
-
-                            const cell =
-                                document.createElement(
-                                    "td"
-                                );
-
-
-                            cell.textContent =
-                                value ||
-                                "Not found";
-
-
-                            row.appendChild(
-                                cell
-                            );
-
-                        }
-                    );
-
-
-                    resultsBody.appendChild(
-                        row
-                    );
-
-                }
-            );
-
-
-            updateSummary();
-
-        }
-
-
-        /* ======================================================
-           SUMMARY
-           ====================================================== */
-
-        function updateSummary() {
-
-            photoCount.textContent =
-                results.length;
-
-
-            iccidCount.textContent =
-                results.filter(
-                    x => x.iccid
-                ).length;
-
-
-            lpaCount.textContent =
-                results.filter(
-                    x => x.lpa
-                ).length;
-
-
-            pinPukCount.textContent =
-                results.filter(
-                    x =>
-                        x.pin &&
-                        x.puk
-                ).length;
+            return allText;
 
         }
 
 
         /* ======================================================
            SCAN ONE PHOTO
-           ====================================================== */
+        ====================================================== */
 
-        async function scanPhoto(file) {
+        async function scanOnePhoto(file) {
 
-            status(
-                "Opening " +
+            console.log(
+                "Scanning:",
                 file.name
             );
 
@@ -1476,21 +1396,18 @@ document.addEventListener(
                 );
 
 
-            preview(file);
-
-
             /*
-             * QR
+             * 1. QR
              */
 
-            let lpa =
+            const lpa =
                 await scanQR(
                     image
                 );
 
 
             /*
-             * ICCID
+             * 2. Barcode
              */
 
             let iccid =
@@ -1500,95 +1417,78 @@ document.addEventListener(
 
 
             /*
-             * PIN / PUK
+             * 3. OCR
              */
 
-            const pinPuk =
-                await scanPINPUK(
+            setStatus(
+                "Reading PIN, PUK and card text..."
+            );
+
+
+            const ocrText =
+                await scanCardText(
                     image
                 );
 
 
-            let text =
-                pinPuk.text || "";
-
-
             /*
-             * Full-card OCR fallback
+             * 4. Extract values
              */
 
-            if (
-                !iccid ||
-                !lpa ||
-                !pinPuk.pin ||
-                !pinPuk.puk
-            ) {
-
-                status(
-                    "Running full-card OCR..."
+            const pin =
+                findPIN(
+                    ocrText
                 );
 
 
-                const fullCanvas =
-                    createCanvas(
-                        image,
-                        FULL,
-                        "normal"
+            const puk =
+                findPUK(
+                    ocrText
+                );
+
+
+            /*
+             * 5. ICCID OCR fallback
+             */
+
+            if (
+                !iccid
+            ) {
+
+                iccid =
+                    findICCID(
+                        ocrText
                     );
-
-
-                const fullText =
-                    await OCR(
-                        fullCanvas
-                    );
-
-
-                text +=
-                    "\n\n" +
-                    fullText;
-
-
-                if (
-                    !iccid
-                ) {
-
-                    iccid =
-                        findICCID(
-                            fullText
-                        );
-
-                }
-
-
-                if (
-                    !lpa
-                ) {
-
-                    lpa =
-                        findLPA(
-                            fullText
-                        );
-
-                }
 
             }
 
 
-            let pin =
-                pinPuk.pin ||
-                findPIN(
-                    text
-                );
+            /*
+             * 6. LPA OCR fallback
+             */
+
+            let finalLPA =
+                lpa;
 
 
-            let puk =
-                pinPuk.puk ||
-                findPUK(
-                    text
-                );
+            if (
+                !finalLPA
+            ) {
+
+                finalLPA =
+                    findLPA(
+                        ocrText
+                    );
+
+            }
 
 
-            let found = 0;
+            /*
+             * 7. Confidence
+             */
+
+            let found =
+                0;
 
 
             if (
@@ -1601,7 +1501,7 @@ document.addEventListener(
 
 
             if (
-                lpa
+                finalLPA
             ) {
 
                 found++;
@@ -1627,11 +1527,12 @@ document.addEventListener(
             }
 
 
-            rawOcrBox.textContent +=
-                "\n\n============================\n" +
-                file.name +
-                "\n============================\n\n" +
-                text;
+            const confidence =
+                (
+                    found *
+                    25
+                ) +
+                "%";
 
 
             return {
@@ -1643,7 +1544,7 @@ document.addEventListener(
                     iccid,
 
                 lpa:
-                    lpa,
+                    finalLPA,
 
                 pin:
                     pin,
@@ -1652,9 +1553,10 @@ document.addEventListener(
                     puk,
 
                 confidence:
-                    (
-                        found * 25
-                    ) + "%"
+                    confidence,
+
+                ocr:
+                    ocrText
 
             };
 
@@ -1662,122 +1564,17 @@ document.addEventListener(
 
 
         /* ======================================================
-           ZXING
-           ====================================================== */
+           START SCANNING
+        ====================================================== */
 
-        function initializeZXing() {
-
-            if (
-                typeof window.ZXing ===
-                "undefined"
-            ) {
-
-                console.warn(
-                    "ZXing is not loaded."
-                );
-
-                return;
-
-            }
-
-
-            try {
-
-                /*
-                 * QR
-                 */
-
-                const qrHints =
-                    new Map();
-
-
-                qrHints.set(
-                    window.ZXing.DecodeHintType.TRY_HARDER,
-                    true
-                );
-
-
-                qrHints.set(
-                    window.ZXing.DecodeHintType.POSSIBLE_FORMATS,
-                    [
-                        window.ZXing.BarcodeFormat.QR_CODE
-                    ]
-                );
-
-
-                qrReader =
-                    new window.ZXing.BrowserMultiFormatReader(
-                        qrHints
-                    );
-
-
-                /*
-                 * Barcode
-                 */
-
-                const barcodeHints =
-                    new Map();
-
-
-                barcodeHints.set(
-                    window.ZXing.DecodeHintType.TRY_HARDER,
-                    true
-                );
-
-
-                barcodeHints.set(
-                    window.ZXing.DecodeHintType.POSSIBLE_FORMATS,
-                    [
-
-                        window.ZXing.BarcodeFormat.CODE_128,
-
-                        window.ZXing.BarcodeFormat.CODE_39,
-
-                        window.ZXing.BarcodeFormat.ITF,
-
-                        window.ZXing.BarcodeFormat.EAN_13,
-
-                        window.ZXing.BarcodeFormat.EAN_8
-
-                    ]
-                );
-
-
-                barcodeReader =
-                    new window.ZXing.BrowserMultiFormatReader(
-                        barcodeHints
-                    );
-
-
-                console.log(
-                    "ZXing ready"
-                );
-
-            }
-            catch (error) {
-
-                console.error(
-                    "ZXing error:",
-                    error
-                );
-
-            }
-
-        }
-
-
-        /* ======================================================
-           START SCAN
-           ====================================================== */
-
-        async function startScan() {
+        async function startScanning() {
 
             if (
                 selectedFiles.length === 0
             ) {
 
-                status(
-                    "Please upload a photo."
+                setStatus(
+                    "Please select a photo first."
                 );
 
                 return;
@@ -1785,28 +1582,22 @@ document.addEventListener(
             }
 
 
-            scanButton.disabled =
-                true;
+            results =
+                [];
 
 
-            results = [];
-
-
-            previewGrid.innerHTML =
-                "";
-
-
-            rawOcrBox.textContent =
+            rawOcr.textContent =
                 "";
 
 
             displayResults();
 
 
+            scanButton.disabled =
+                true;
+
+
             try {
-
-                initializeZXing();
-
 
                 for (
                     let i = 0;
@@ -1814,7 +1605,7 @@ document.addEventListener(
                     i++
                 ) {
 
-                    status(
+                    setStatus(
                         "Scanning photo " +
                         (
                             i + 1
@@ -1825,7 +1616,7 @@ document.addEventListener(
 
 
                     const result =
-                        await scanPhoto(
+                        await scanOnePhoto(
                             selectedFiles[i]
                         );
 
@@ -1835,28 +1626,36 @@ document.addEventListener(
                     );
 
 
+                    rawOcr.textContent +=
+                        "\n\n============================\n" +
+                        result.file +
+                        "\n============================\n\n" +
+                        result.ocr;
+
+
                     displayResults();
 
                 }
 
 
-                status(
-                    "Scan completed."
+                setStatus(
+                    "Scan completed successfully."
                 );
 
             }
             catch (error) {
 
                 console.error(
+                    "SCAN ERROR:",
                     error
                 );
 
 
-                status(
-                    "Error: " +
+                setStatus(
+                    "Scan error: " +
                     (
                         error.message ||
-                        error
+                        String(error)
                     )
                 );
 
@@ -1870,14 +1669,244 @@ document.addEventListener(
 
 
         /* ======================================================
+           DISPLAY RESULTS
+        ====================================================== */
+
+        function displayResults() {
+
+            resultsBody.innerHTML =
+                "";
+
+
+            if (
+                results.length === 0
+            ) {
+
+                resultsBody.innerHTML = `
+                    <tr>
+                        <td colspan="7">
+                            No results yet.
+                        </td>
+                    </tr>
+                `;
+
+
+                updateSummary();
+
+
+                return;
+
+            }
+
+
+            results.forEach(
+                function (result, index) {
+
+                    const row =
+                        document.createElement(
+                            "tr"
+                        );
+
+
+                    addCell(
+                        row,
+                        index + 1
+                    );
+
+
+                    addCell(
+                        row,
+                        result.file
+                    );
+
+
+                    addResultCell(
+                        row,
+                        result.iccid
+                    );
+
+
+                    addResultCell(
+                        row,
+                        result.lpa
+                    );
+
+
+                    addResultCell(
+                        row,
+                        result.pin
+                    );
+
+
+                    addResultCell(
+                        row,
+                        result.puk
+                    );
+
+
+                    addCell(
+                        row,
+                        result.confidence
+                    );
+
+
+                    resultsBody.appendChild(
+                        row
+                    );
+
+                }
+            );
+
+
+            updateSummary();
+
+        }
+
+
+        /* ======================================================
+           TABLE CELL
+        ====================================================== */
+
+        function addCell(
+            row,
+            value
+        ) {
+
+            const cell =
+                document.createElement(
+                    "td"
+                );
+
+
+            cell.textContent =
+                value ||
+                "";
+
+
+            row.appendChild(
+                cell
+            );
+
+        }
+
+
+        /* ======================================================
+           RESULT CELL
+        ====================================================== */
+
+        function addResultCell(
+            row,
+            value
+        ) {
+
+            const cell =
+                document.createElement(
+                    "td"
+                );
+
+
+            if (
+                value
+            ) {
+
+                cell.textContent =
+                    value;
+
+
+                cell.className =
+                    "found";
+
+            }
+            else {
+
+                cell.textContent =
+                    "Not found";
+
+
+                cell.className =
+                    "not-found";
+
+            }
+
+
+            row.appendChild(
+                cell
+            );
+
+        }
+
+
+        /* ======================================================
+           SUMMARY
+        ====================================================== */
+
+        function updateSummary() {
+
+            photoCount.textContent =
+                results.length;
+
+
+            iccidCount.textContent =
+                results.filter(
+                    function (item) {
+
+                        return Boolean(
+                            item.iccid
+                        );
+
+                    }
+                ).length;
+
+
+            lpaCount.textContent =
+                results.filter(
+                    function (item) {
+
+                        return Boolean(
+                            item.lpa
+                        );
+
+                    }
+                ).length;
+
+
+            pinPukCount.textContent =
+                results.filter(
+                    function (item) {
+
+                        return (
+                            item.pin &&
+                            item.puk
+                        );
+
+                    }
+                ).length;
+
+        }
+
+
+        /* ======================================================
            SCAN AGAIN
-           ====================================================== */
+        ====================================================== */
 
         scanButton.addEventListener(
             "click",
             async function () {
 
-                await startScan();
+                if (
+                    selectedFiles.length === 0
+                ) {
+
+                    setStatus(
+                        "Please upload a photo first."
+                    );
+
+                    return;
+
+                }
+
+
+                await startScanning();
 
             }
         );
@@ -1885,7 +1914,7 @@ document.addEventListener(
 
         /* ======================================================
            CLEAR
-           ====================================================== */
+        ====================================================== */
 
         clearButton.addEventListener(
             "click",
@@ -1894,12 +1923,14 @@ document.addEventListener(
                 selectedFiles =
                     [];
 
+
                 results =
                     [];
 
 
                 fileInput.value =
                     "";
+
 
                 cameraInput.value =
                     "";
@@ -1909,14 +1940,14 @@ document.addEventListener(
                     "";
 
 
-                rawOcrBox.textContent =
+                rawOcr.textContent =
                     "OCR text will appear here.";
 
 
                 displayResults();
 
 
-                status(
+                setStatus(
                     "Ready. Click Upload Photo."
                 );
 
@@ -1925,8 +1956,8 @@ document.addEventListener(
 
 
         /* ======================================================
-           CSV EXPORT
-           ====================================================== */
+           EXPORT CSV
+        ====================================================== */
 
         exportButton.addEventListener(
             "click",
@@ -1936,8 +1967,8 @@ document.addEventListener(
                     results.length === 0
                 ) {
 
-                    status(
-                        "Nothing to export."
+                    setStatus(
+                        "There are no results to export."
                     );
 
                     return;
@@ -1948,7 +1979,7 @@ document.addEventListener(
                 const rows = [
 
                     [
-                        "File",
+                        "Photo",
                         "ICCID",
                         "LPA / QR",
                         "PIN",
@@ -1960,22 +1991,22 @@ document.addEventListener(
 
 
                 results.forEach(
-                    function (item) {
+                    function (result) {
 
                         rows.push(
                             [
 
-                                item.file,
+                                result.file,
 
-                                item.iccid,
+                                result.iccid,
 
-                                item.lpa,
+                                result.lpa,
 
-                                item.pin,
+                                result.pin,
 
-                                item.puk,
+                                result.puk,
 
-                                item.confidence
+                                result.confidence
 
                             ]
                         );
@@ -1997,10 +2028,11 @@ document.addEventListener(
                                                 String(
                                                     value ||
                                                     ""
-                                                ).replace(
-                                                    /"/g,
-                                                    '""'
-                                                ) +
+                                                )
+                                                    .replace(
+                                                        /"/g,
+                                                        '""'
+                                                    ) +
                                                 '"';
 
                                         }
@@ -2042,11 +2074,26 @@ document.addEventListener(
                     "esim_scan_results.csv";
 
 
+                document.body.appendChild(
+                    link
+                );
+
+
                 link.click();
+
+
+                document.body.removeChild(
+                    link
+                );
 
 
                 URL.revokeObjectURL(
                     url
+                );
+
+
+                setStatus(
+                    "CSV exported."
                 );
 
             }
@@ -2054,16 +2101,29 @@ document.addEventListener(
 
 
         /* ======================================================
-           READY
-           ====================================================== */
+           INITIAL READY
+        ====================================================== */
 
-        verifyLibraries();
-
-
-        status(
-            "Ready. Click Upload Photo."
+        console.log(
+            "File input:",
+            fileInput
         );
 
+
+        console.log(
+            "Camera input:",
+            cameraInput
+        );
+
+
+        console.log(
+            "All event listeners attached."
+        );
+
+
+        setStatus(
+            "Ready. Click Upload Photo."
+        );
 
     }
 );

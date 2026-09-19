@@ -960,3 +960,6 @@ historyBody.addEventListener('click',e=>{
   const raw=e.target.closest('[data-raw]');
   if(raw){ const entry=historyData.find(x=>x.id===+raw.dataset.raw); if(entry){ entry.showRaw=!entry.showRaw; renderTable(); } }
 });
+
+/* Tells the boot diagnostics in index.html that this file loaded and ran to the end. */
+window.__esimReady = true;

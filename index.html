@@ -14,11 +14,42 @@
 <!-- ZXing: Code128 (ICCID barcode) + QR fallback. Loaded best-effort. -->
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
 
+<script>
+/* Boot diagnostics — runs before anything else. If code.js or a CDN library fails to
+   load, the buttons go dead silently; this turns that into a visible message. */
+window.__bootErrors = [];
+function __showBoot(msg){
+  var el = document.getElementById('bootError');
+  var text = msg || window.__bootErrors.join('\n');
+  if(!el || !text) return;
+  el.textContent = text;
+  el.style.display = 'block';
+}
+window.addEventListener('error', function(e){
+  if (e.target && e.target.tagName === 'SCRIPT') {
+    var name = (e.target.src || 'a script').split('/').pop();
+    window.__bootErrors.push('Could not load ' + name + ' — check the file name, the folder, and the Network tab for a 404.');
+  } else {
+    window.__bootErrors.push((e.message || 'Script error') + (e.filename ? ' — ' + e.filename.split('/').pop() + ':' + e.lineno : ''));
+  }
+  __showBoot();
+}, true);
+window.addEventListener('load', function(){
+  setTimeout(function(){
+    if (!window.__esimReady) {
+      __showBoot(window.__bootErrors.length
+        ? window.__bootErrors.join('\n')
+        : 'code.js did not run, so none of the buttons are wired up. It is missing, misnamed, or blocked — open DevTools > Network and reload to see which.');
+    }
+  }, 1500);
+});
+</script>
 <style>
   :root{--teal:#0f766e;--teal-dark:#115e59;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--bad:#c5221f;--ok:#15803d;--warn:#b45309;}
   *{box-sizing:border-box;}
   body{font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#eef1f4;color:var(--ink);margin:0;padding:16px;}
   .container{max-width:900px;margin:16px auto;background:#fff;padding:22px;border-radius:16px;box-shadow:0 6px 24px rgba(15,23,42,.08);}
+  #bootError{display:none;white-space:pre-wrap;background:#fef2f2;border:1px solid #fecaca;color:#c5221f;font-size:14px;font-weight:600;border-radius:10px;padding:12px 14px;margin:0 0 16px;}
   h1{font-size:20px;margin:0 0 4px;}
   .sub{color:var(--muted);font-size:14px;margin:0 0 18px;}
 
@@ -90,6 +121,7 @@
 <body>
 
 <div class="container">
+  <div id="bootError"></div>
   <h1>eSIM card scanner</h1>
   <p class="sub">Reads the LPA from the QR code, the ICCID from the Code128 barcode, and the PIN / PUK from the printed box. Upload photos in bulk or scan live. Everything runs on your device.</p>
 

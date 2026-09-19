@@ -5,171 +5,747 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>eSIM Card Scanner</title>
 
-<!-- jsQR: primary QR decoder -->
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-<!-- Tesseract.js v5 — v4 used a DIFFERENT createWorker signature, which is what caused
-     "Cannot read properties of null (reading 'setImage')": the worker was created but the
-     language model was never initialised, so the underlying Tess API was still null. -->
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
-<!-- ZXing: Code128 (ICCID barcode) + QR fallback. Loaded best-effort. -->
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
 
-<script>
-/* Boot diagnostics — runs before anything else. If code.js or a CDN library fails to
-   load, the buttons go dead silently; this turns that into a visible message. */
-window.__bootErrors = [];
-function __showBoot(msg){
-  var el = document.getElementById('bootError');
-  var text = msg || window.__bootErrors.join('\n');
-  if(!el || !text) return;
-  el.textContent = text;
-  el.style.display = 'block';
-}
-window.addEventListener('error', function(e){
-  if (e.target && e.target.tagName === 'SCRIPT') {
-    var name = (e.target.src || 'a script').split('/').pop();
-    window.__bootErrors.push('Could not load ' + name + ' — check the file name, the folder, and the Network tab for a 404.');
-  } else {
-    window.__bootErrors.push((e.message || 'Script error') + (e.filename ? ' — ' + e.filename.split('/').pop() + ':' + e.lineno : ''));
-  }
-  __showBoot();
-}, true);
-window.addEventListener('load', function(){
-  setTimeout(function(){
-    if (!window.__esimReady) {
-      __showBoot(window.__bootErrors.length
-        ? window.__bootErrors.join('\n')
-        : 'code.js did not run, so none of the buttons are wired up. It is missing, misnamed, or blocked — open DevTools > Network and reload to see which.');
-    }
-  }, 1500);
-});
-</script>
 <style>
   :root{--teal:#0f766e;--teal-dark:#115e59;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--bad:#c5221f;--ok:#15803d;--warn:#b45309;}
   *{box-sizing:border-box;}
   body{font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#eef1f4;color:var(--ink);margin:0;padding:16px;}
   .container{max-width:900px;margin:16px auto;background:#fff;padding:22px;border-radius:16px;box-shadow:0 6px 24px rgba(15,23,42,.08);}
-  #bootError{display:none;white-space:pre-wrap;background:#fef2f2;border:1px solid #fecaca;color:#c5221f;font-size:14px;font-weight:600;border-radius:10px;padding:12px 14px;margin:0 0 16px;}
   h1{font-size:20px;margin:0 0 4px;}
   .sub{color:var(--muted);font-size:14px;margin:0 0 18px;}
+  #boot{display:none;white-space:pre-wrap;background:#fef2f2;border:1px solid #fecaca;color:var(--bad);font-size:14px;font-weight:600;border-radius:10px;padding:12px 14px;margin:0 0 16px;}
 
-  .viewfinder{position:relative;background:#000;border-radius:14px;overflow:hidden;aspect-ratio:3/4;max-height:56vh;margin:0 auto;display:none;}
-  .viewfinder.on{display:block;}
-  #video{width:100%;height:100%;object-fit:cover;display:block;background:#000;}
-  #overlay{position:absolute;inset:0;pointer-events:none;box-shadow:inset 0 0 0 2px rgba(255,255,255,.25);border-radius:14px;transition:box-shadow .12s,background .12s;}
-  #overlay.flash{box-shadow:inset 0 0 0 5px #22c55e;background:rgba(34,197,94,.14);}
-  .chips{position:absolute;top:10px;left:10px;display:flex;gap:6px;}
-  .chip{font-size:12px;font-weight:700;color:#fff;background:rgba(15,23,42,.55);border-radius:20px;padding:4px 10px;}
-  .chip.chip-on{background:var(--ok);}
+  .pickers{display:flex;gap:10px;flex-wrap:wrap;}
+  .pick{flex:1;min-width:200px;display:block;text-align:center;background:var(--teal);color:#fff;padding:18px;border-radius:12px;font-weight:700;font-size:16px;cursor:pointer;}
+  .pick:hover{background:var(--teal-dark);}
+  .pick.alt{background:#fff;color:var(--teal);border:1.5px solid var(--teal);}
+  .pick.alt:hover{background:#f0fdfa;}
+  .pick input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;}
+  .note{color:var(--muted);font-size:13px;text-align:center;margin:10px 0 0;}
 
-  .dropzone{border:2px dashed #cbd5e1;border-radius:14px;background:#f8fafc;padding:26px 18px;text-align:center;transition:background .12s,border-color .12s;}
-  .dropzone.drag{background:#ecfeff;border-color:var(--teal);}
-  .dropzone p{margin:8px 0 0;color:var(--muted);font-size:13px;}
-
-  .row{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;}
-  .row > button{flex:1;min-width:140px;padding:14px;border-radius:9px;font-weight:600;font-size:15px;cursor:pointer;border:1px solid #cbd5e1;background:#fff;color:var(--ink);}
-  .row > button.primary{background:var(--teal);color:#fff;border-color:var(--teal);font-weight:700;}
-  .row > button.primary:hover:not(:disabled){background:var(--teal-dark);}
-  .row > button:hover:not(:disabled){background:#f1f5f9;}
-  .row > button.primary:hover:not(:disabled){background:var(--teal-dark);}
-  .row > button:disabled{opacity:.5;cursor:not-allowed;}
-
-  .thumbs{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:12px;}
-  .thumbs img{width:46px;height:46px;object-fit:cover;border-radius:6px;border:1px solid #cbd5e1;opacity:.45;}
-  .thumbs img.done{opacity:1;border-color:var(--ok);}
+  .thumbs{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:14px;}
+  .thumbs img{width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid #cbd5e1;opacity:.4;}
   .thumbs img.active{opacity:1;border-color:var(--teal);box-shadow:0 0 0 2px #99f6e4;}
-
-  .ai-toggle{display:flex;align-items:center;gap:8px;justify-content:center;font-size:13px;color:var(--muted);margin:14px 0 2px;}
-  #status{text-align:center;font-size:14px;min-height:20px;margin:8px 0 4px;color:var(--muted);white-space:pre-wrap;}
+  .thumbs img.done{opacity:1;border-color:var(--ok);}
+  #bar{height:4px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:12px;display:none;}
+  #bar.on{display:block;}
+  #barFill{height:100%;width:0;background:var(--teal);transition:width .25s;}
+  #status{text-align:center;font-size:14px;min-height:22px;margin:10px 0 2px;color:var(--muted);white-space:pre-wrap;}
   #status.error{color:var(--bad);font-weight:600;}
-  #progress{height:4px;background:var(--line);border-radius:4px;overflow:hidden;display:none;}
-  #progress.on{display:block;}
-  #progressBar{height:100%;width:0;background:var(--teal);transition:width .2s;}
+
+  .actions{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap;}
+  .actions button{flex:1;min-width:140px;padding:13px;border-radius:9px;font-weight:600;font-size:15px;cursor:pointer;border:1px solid #cbd5e1;background:#fff;color:var(--ink);}
+  .actions button:hover:not(:disabled){background:#f1f5f9;}
+  .actions button:disabled{opacity:.5;cursor:not-allowed;}
 
   h3{margin:26px 0 10px;font-size:16px;}
   .table-wrap{overflow-x:auto;}
   table{width:100%;border-collapse:collapse;min-width:640px;}
   th,td{border-bottom:1px solid var(--line);padding:10px;text-align:left;font-size:14px;vertical-align:middle;}
-  th{color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.03em;}
-  .lpa-text{font-family:ui-monospace,monospace;font-size:11px;color:#475569;word-break:break-all;max-width:240px;}
+  th{color:var(--muted);font-weight:600;font-size:12px;}
+  .lpa-text{font-family:ui-monospace,monospace;font-size:11px;color:#475569;word-break:break-all;max-width:230px;}
   .edit{display:inline-block;min-width:40px;padding:2px 5px;border-radius:4px;outline:none;cursor:text;}
   .edit:hover{background:#f1f5f9;}
   .edit:focus{background:#ecfeff;box-shadow:0 0 0 2px var(--teal) inset;}
   .bad{color:var(--bad);}
-  .ok-badge{color:var(--ok);margin-left:4px;cursor:help;}
-  .warn-badge{color:var(--bad);margin-left:4px;cursor:help;}
   .tag{display:inline-block;font-size:10px;font-weight:700;border-radius:4px;padding:0 4px;margin-left:5px;vertical-align:middle;}
   .tag-bc{color:var(--ok);border:1px solid var(--ok);}
-  .tag-ai{color:var(--teal);border:1px solid var(--teal);}
-  .tag-saved{color:var(--ok);border:1px solid var(--ok);}
-  .tag-low{color:var(--bad);border:1px solid var(--bad);}
-  .tag-blur{color:var(--warn);border:1px solid var(--warn);}
   .tag-dup{color:var(--warn);border:1px solid var(--warn);}
-  .icon-btn{background:#f1f5f9;color:var(--ink);border:none;border-radius:6px;padding:6px 9px;cursor:pointer;font-size:14px;line-height:1;margin-left:4px;}
-  .icon-btn:hover{background:#e2e8f0;}
+  .tag-saved{color:var(--ok);border:1px solid var(--ok);}
+  .icon-btn{background:#f1f5f9;border:none;border-radius:6px;padding:6px 9px;cursor:pointer;font-size:14px;margin-left:4px;}
   .icon-btn.del{background:#fee2e2;color:var(--bad);}
-  .icon-btn.del:hover{background:#fecaca;}
+  .rowthumb{width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid #cbd5e1;display:block;margin-bottom:4px;cursor:zoom-in;}
   .raw-row td{background:#0f172a;padding:0;}
   .raw-text{color:#e2e8f0;font-family:ui-monospace,monospace;font-size:12px;white-space:pre-wrap;word-break:break-word;margin:0;padding:12px 14px;max-height:280px;overflow-y:auto;}
-  .rowthumb{width:46px;height:46px;object-fit:cover;border-radius:6px;border:1px solid #cbd5e1;display:block;margin-bottom:4px;cursor:zoom-in;}
   .empty{color:var(--muted);font-size:14px;padding:14px 0;}
   .hint{color:var(--muted);font-size:13px;line-height:1.5;}
   footer{text-align:center;color:var(--muted);font-size:12px;margin-top:20px;}
-  @media (max-width:560px){.container{padding:16px;} .row > button{min-width:100%;}}
+  @media (max-width:560px){.container{padding:16px;} .actions button{min-width:100%;}}
 </style>
 </head>
 <body>
-
 <div class="container">
-  <div id="bootError"></div>
+  <div id="boot"></div>
   <h1>eSIM card scanner</h1>
-  <p class="sub">Reads the LPA from the QR code, the ICCID from the Code128 barcode, and the PIN / PUK from the printed box. Upload photos in bulk or scan live. Everything runs on your device.</p>
+  <p class="sub">Reads the LPA from the QR code, the ICCID from the barcode, and the PIN and PUK from the printed box. One row per photo, all on your device.</p>
 
-  <div class="viewfinder" id="viewfinder">
-    <video id="video" playsinline muted autoplay></video>
-    <div id="overlay"></div>
-    <div class="chips">
-      <span class="chip" id="chipQR">&#9675; QR</span>
-      <span class="chip" id="chipICCID">&#9675; ICCID</span>
-    </div>
+  <!-- Labels open the file picker natively. No JavaScript is involved in that step,
+       so the picker opens even if a script fails to load. -->
+  <div class="pickers">
+    <label class="pick">Choose photos
+      <input type="file" id="fileInput" accept="image/*" multiple>
+    </label>
+    <label class="pick alt">Take a photo
+      <input type="file" id="cameraInput" accept="image/*" capture="environment">
+    </label>
   </div>
-
-  <div class="dropzone" id="dropzone">
-    <button class="row-btn" id="pickBtn" style="background:var(--teal);color:#fff;border:none;padding:14px 22px;border-radius:9px;font-weight:700;font-size:16px;cursor:pointer;">Choose photos</button>
-    <input type="file" id="fileInput" accept="image/*" multiple hidden>
-    <p>Pick as many card photos as you like, or drag them here. Each photo becomes one row.</p>
-  </div>
-
-  <div class="row">
-    <button class="primary" id="startBtn">Start camera</button>
-    <button id="captureBtn" style="display:none;">Capture card</button>
-    <button id="stopBtn" style="display:none;">Stop camera</button>
-    <button id="torchBtn" style="display:none;">Torch: off</button>
-  </div>
+  <p class="note">Pick one card or fifty. On a phone, "Take a photo" opens the camera straight away.</p>
 
   <div class="thumbs" id="thumbs"></div>
-  <div id="progress"><div id="progressBar"></div></div>
+  <div id="bar"><div id="barFill"></div></div>
   <div id="status"></div>
 
-  <div class="row">
+  <div class="actions">
     <button id="saveBtn">Save to sheet</button>
-    <button id="downloadBtn">Export CSV</button>
+    <button id="csvBtn">Export CSV</button>
     <button id="clearBtn">Clear all rows</button>
   </div>
-  <label class="ai-toggle"><input type="checkbox" id="aiToggle"> Double-check printed fields with AI (needs your verify endpoint)</label>
 
   <h3>Records</h3>
   <div class="table-wrap">
-    <table id="historyTable">
+    <table id="tbl">
       <thead><tr><th>Source</th><th>ICCID</th><th>PIN</th><th>PUK</th><th>LPA code</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
-  <p class="hint" id="tableHint" style="display:none;">Tap any value to edit it. An ICCID tagged <span class="tag tag-bc">BARCODE</span> came straight off the Code128 and is reliable. PIN and PUK have no checksum, so check anything that looks odd — the magnifier button shows the raw OCR text for that row.</p>
+  <p class="hint" id="hint" style="display:none;">Tap a value to edit it. An ICCID tagged <span class="tag tag-bc">BARCODE</span> came off the barcode and is reliable. The magnifier shows the raw OCR text for that row.</p>
 
-  <footer>QR, barcode and OCR run in your browser. Nothing leaves the device unless you save to your sheet or turn on AI check.</footer>
+  <footer>Everything runs in this page. Nothing is uploaded unless you save to your sheet.</footer>
 </div>
 
-<script src="code.js"></script>
+<script>
+/* ===================== CONFIG ===================== */
+var SHEET_ENDPOINT = 'https://script.google.com/macros/s/AKfycbxXrrPh05ep23EKnDZT32cuMq7UDPclhi4CFL2YU9MXmzqwP16CkKTpY86Ffu0K5T6a/exec';
+var SHEET_SECRET   = 'CHANGE_ME';       // must match SECRET in Code.gs
+var WORK_SIZE      = 2400;              // working resolution
+var MAX_OCR_PASSES = 5;                 // per photo
+
+/* ===================== BOOT CHECK ===================== */
+function showBoot(msg){ var el=document.getElementById('boot'); el.textContent=msg; el.style.display='block'; }
+window.addEventListener('error', function(e){
+  if(e.target && e.target.tagName==='SCRIPT'){ showBoot('Could not load '+String(e.target.src).split('/').pop()+'. Check your connection or ad blocker, then reload.'); }
+}, true);
+
+var $ = function(id){ return document.getElementById(id); };
+var fileInput=$('fileInput'), cameraInput=$('cameraInput'), thumbsEl=$('thumbs');
+var barEl=$('bar'), barFill=$('barFill'), statusEl=$('status'), hintEl=$('hint');
+var tbody=document.querySelector('#tbl tbody');
+var rows=[], nextId=1, running=false;
+
+function setStatus(msg,isErr){ statusEl.textContent=msg||''; statusEl.className=isErr?'error':''; if(isErr) console.error(msg); }
+function setBar(done,total){
+  if(!total){ barEl.classList.remove('on'); barFill.style.width='0'; return; }
+  barEl.classList.add('on'); barFill.style.width=Math.round(done/total*100)+'%';
+}
+
+window.addEventListener('load', function(){
+  var missing=[];
+  if(typeof Tesseract==='undefined') missing.push('Tesseract.js');
+  if(typeof jsQR==='undefined') missing.push('jsQR');
+  if(typeof ZXing==='undefined') missing.push('ZXing');
+  if(missing.length) showBoot('These libraries did not load: '+missing.join(', ')+'. Check the connection or an ad blocker, then reload.');
+  render();
+});
+
+/* ===================== OCR (two safe paths) =====================
+   A reusable worker is fast, but its constructor differs between Tesseract v4
+   and v5 — getting that wrong is what produced "cannot read properties of null
+   (reading setImage)". If the worker cannot be built, or its first call fails,
+   this drops permanently to Tesseract.recognize(), which manages its own worker
+   and cannot hit that bug. Slower, but it always reads.
+   ================================================================ */
+var _worker=null, _workerTried=false, _workerBroken=false, _digitWorker=null, _digitTried=false;
+
+function makeWorker(params){
+  return new Promise(function(resolve,reject){
+    if(typeof Tesseract==='undefined'||typeof Tesseract.createWorker!=='function'){ reject(new Error('no tesseract')); return; }
+    var opts={};
+    var built;
+    try{ built=Tesseract.createWorker('eng',1,opts); }      // v5 signature
+    catch(e){ built=Tesseract.createWorker(opts); }          // v4 signature
+    Promise.resolve(built).then(function(w){
+      if(!w) throw new Error('no worker');
+      var chain=Promise.resolve();
+      if(typeof w.loadLanguage==='function'&&typeof w.initialize==='function'){
+        chain=w.loadLanguage('eng').then(function(){ return w.initialize('eng'); }).catch(function(){});
+      }
+      return chain.then(function(){
+        if(params&&w.setParameters) return w.setParameters(params).then(function(){return w;}).catch(function(){return w;});
+        return w;
+      });
+    }).then(resolve).catch(reject);
+  });
+}
+function ocr(canvas,label){
+  setStatus(label||'Reading…');
+  if(_workerBroken) return recognizeSimple(canvas,label);
+  if(!_workerTried){
+    _workerTried=true;
+    return makeWorker({tessedit_pageseg_mode:'6'}).then(function(w){
+      _worker=w; return workerRead(canvas,label);
+    }).catch(function(){ _workerBroken=true; return recognizeSimple(canvas,label); });
+  }
+  if(_worker) return workerRead(canvas,label);
+  return recognizeSimple(canvas,label);
+}
+function workerRead(canvas,label){
+  return _worker.recognize(canvas).then(function(r){ return (r&&r.data&&r.data.text)||''; })
+   .catch(function(e){ console.warn('worker read failed, switching to the simple path:',e); _workerBroken=true; return recognizeSimple(canvas,label); });
+}
+function recognizeSimple(canvas,label){
+  return Tesseract.recognize(canvas,'eng',{logger:function(m){
+    if(m&&m.status==='recognizing text') setStatus((label||'Reading')+' '+Math.round(m.progress*100)+'%');
+  }}).then(function(r){ return (r&&r.data&&r.data.text)||''; })
+   .catch(function(e){ console.warn('OCR failed:',e); return ''; });
+}
+function ocrDigits(canvas){
+  if(_workerBroken) return Promise.resolve('');      // whitelist needs a worker
+  if(!_digitTried){
+    _digitTried=true;
+    return makeWorker({tessedit_char_whitelist:'0123456789 ',tessedit_pageseg_mode:'6'})
+      .then(function(w){ _digitWorker=w; return w.recognize(canvas); })
+      .then(function(r){ return (r&&r.data&&r.data.text)||''; })
+      .catch(function(){ return ''; });
+  }
+  if(!_digitWorker) return Promise.resolve('');
+  return _digitWorker.recognize(canvas).then(function(r){ return (r&&r.data&&r.data.text)||''; }).catch(function(){ return ''; });
+}
+
+/* ===================== ZXING ===================== */
+var _qrReader=null,_barReader=null,_readersInit=false;
+function makeReader(formats){
+  if(typeof ZXing==='undefined') return null;
+  try{
+    var hints=new Map();
+    hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,formats);
+    return new ZXing.BrowserMultiFormatReader(hints);
+  }catch(e){ return null; }
+}
+function initReaders(){
+  if(_readersInit) return;
+  _readersInit=true;
+  if(typeof ZXing==='undefined') return;
+  _qrReader=makeReader([ZXing.BarcodeFormat.QR_CODE]);
+  _barReader=makeReader([ZXing.BarcodeFormat.CODE_128,ZXing.BarcodeFormat.CODE_39,ZXing.BarcodeFormat.ITF]);
+}
+function zx(reader,canvas){
+  if(!reader||!canvas) return null;
+  try{ var r=reader.decodeFromCanvas(canvas); if(!r) return null; return r.getText?r.getText():(r.text||null); }
+  catch(e){ return null; }
+}
+
+/* ===================== CANVAS ===================== */
+function toCanvas(img){
+  var w=img.naturalWidth||img.width, h=img.naturalHeight||img.height;
+  var c=document.createElement('canvas'); c.width=w; c.height=h;
+  c.getContext('2d').drawImage(img,0,0,w,h);
+  return c;
+}
+function fit(img,size){
+  var s=size/Math.max(img.width,img.height);
+  var c=document.createElement('canvas');
+  c.width=Math.max(1,Math.round(img.width*s)); c.height=Math.max(1,Math.round(img.height*s));
+  var x=c.getContext('2d'); x.imageSmoothingEnabled=true; x.imageSmoothingQuality='high';
+  x.drawImage(img,0,0,c.width,c.height);
+  return c;
+}
+function crop(img,x0,y0,x1,y1){
+  var sx=Math.max(0,Math.round(img.width*x0)), sy=Math.max(0,Math.round(img.height*y0));
+  var ex=Math.min(img.width,Math.round(img.width*x1)), ey=Math.min(img.height,Math.round(img.height*y1));
+  var sw=ex-sx, sh=ey-sy;
+  if(sw<12||sh<12) return null;
+  var scale=Math.min(3,Math.max(1,1600/sw));
+  var c=document.createElement('canvas');
+  c.width=Math.round(sw*scale); c.height=Math.round(sh*scale);
+  var x=c.getContext('2d'); x.imageSmoothingEnabled=true; x.imageSmoothingQuality='high';
+  x.drawImage(img,sx,sy,sw,sh,0,0,c.width,c.height);
+  return c;
+}
+function rotate(src,deg){
+  var c=document.createElement('canvas');
+  if(deg===90||deg===270){ c.width=src.height; c.height=src.width; } else { c.width=src.width; c.height=src.height; }
+  var x=c.getContext('2d');
+  x.translate(c.width/2,c.height/2); x.rotate(deg*Math.PI/180);
+  x.drawImage(src,-src.width/2,-src.height/2);
+  return c;
+}
+function otsu(g){
+  var hist=new Array(256), i;
+  for(i=0;i<256;i++) hist[i]=0;
+  for(i=0;i<g.length;i++) hist[g[i]]++;
+  var total=g.length, sum=0;
+  for(i=0;i<256;i++) sum+=i*hist[i];
+  var sumB=0,wB=0,varMax=0,t=127;
+  for(i=0;i<256;i++){
+    wB+=hist[i]; if(wB===0) continue;
+    var wF=total-wB; if(wF===0) break;
+    sumB+=i*hist[i];
+    var mB=sumB/wB, mF=(sum-sumB)/wF;
+    var between=wB*wF*(mB-mF)*(mB-mF);
+    if(between>varMax){ varMax=between; t=i; }
+  }
+  return t;
+}
+function sharpen(g,w,h){
+  var out=new Uint8ClampedArray(g.length), k=[0,-1,0,-1,5,-1,0,-1,0];
+  for(var y=0;y<h;y++) for(var x=0;x<w;x++){
+    var i=y*w+x;
+    if(x===0||y===0||x===w-1||y===h-1){ out[i]=g[i]; continue; }
+    var s=0,ki=0;
+    for(var dy=-1;dy<=1;dy++) for(var dx=-1;dx<=1;dx++){ s+=g[i+dy*w+dx]*k[ki++]; }
+    out[i]=s;
+  }
+  return out;
+}
+/* invert:true gives DARK text on a LIGHT background — what Tesseract expects.
+   Vodafone prints white on red, so the un-inverted version read badly. */
+function binarize(src,channel,invert,doSharp){
+  var w=src.width,h=src.height;
+  var c=document.createElement('canvas'); c.width=w; c.height=h;
+  var ctx=c.getContext('2d'); ctx.drawImage(src,0,0);
+  var id=ctx.getImageData(0,0,w,h), d=id.data, g=new Uint8ClampedArray(w*h), i, p;
+  if(channel==='blue'){ for(i=0,p=0;i<d.length;i+=4,p++) g[p]=d[i+2]; }
+  else { for(i=0,p=0;i<d.length;i+=4,p++) g[p]=d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114; }
+  if(doSharp) g=sharpen(g,w,h);
+  var t=otsu(g);
+  for(i=0,p=0;i<d.length;i+=4,p++){
+    var above=g[p]>t, v=invert?(above?0:255):(above?255:0);
+    d[i]=d[i+1]=d[i+2]=v; d[i+3]=255;
+  }
+  ctx.putImageData(id,0,0);
+  return c;
+}
+function graySharp(src){
+  var w=src.width,h=src.height;
+  var c=document.createElement('canvas'); c.width=w; c.height=h;
+  var ctx=c.getContext('2d'); ctx.drawImage(src,0,0);
+  var id=ctx.getImageData(0,0,w,h), d=id.data, g=new Uint8ClampedArray(w*h), i, p;
+  for(i=0,p=0;i<d.length;i+=4,p++) g[p]=d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114;
+  g=sharpen(g,w,h);
+  for(i=0,p=0;i<d.length;i+=4,p++){ d[i]=d[i+1]=d[i+2]=g[p]; d[i+3]=255; }
+  ctx.putImageData(id,0,0);
+  return c;
+}
+function up(src,target){
+  var s=Math.max(1,Math.min(4,target/Math.max(src.width,src.height)));
+  if(s===1) return src;
+  var c=document.createElement('canvas');
+  c.width=Math.round(src.width*s); c.height=Math.round(src.height*s);
+  var x=c.getContext('2d'); x.imageSmoothingEnabled=true; x.imageSmoothingQuality='high';
+  x.drawImage(src,0,0,c.width,c.height);
+  return c;
+}
+function thumbOf(img){
+  var s=Math.min(1,1200/Math.max(img.width,img.height));
+  var c=document.createElement('canvas');
+  c.width=Math.round(img.width*s); c.height=Math.round(img.height*s);
+  c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+  return c.toDataURL('image/jpeg',0.8);
+}
+
+/* ===================== QR ===================== */
+function jsqrRead(c){
+  if(typeof jsQR==='undefined') return null;
+  try{
+    var id=c.getContext('2d').getImageData(0,0,c.width,c.height);
+    var code=jsQR(id.data,c.width,c.height,{inversionAttempts:'attemptBoth'});
+    return code?code.data:null;
+  }catch(e){ return null; }
+}
+function findQR(base){
+  var tries=[base,binarize(base,'luma',false,false)];
+  var boxes=[[0,0,.6,.6],[.4,0,1,.6],[0,.4,.6,1],[.4,.4,1,1],[.2,.2,.8,.8]];
+  for(var i=0;i<boxes.length;i++){ var c=crop(base,boxes[i][0],boxes[i][1],boxes[i][2],boxes[i][3]); if(c) tries.push(c); }
+  var j;
+  for(j=0;j<tries.length;j++){ var v=jsqrRead(tries[j]); if(v) return v; }
+  initReaders();
+  for(j=0;j<tries.length;j++){ var z=zx(_qrReader,tries[j]); if(z) return z; }
+  var degs=[90,180,270];
+  for(j=0;j<degs.length;j++){
+    var r=rotate(base,degs[j]);
+    var v2=jsqrRead(r)||zx(_qrReader,r);
+    if(v2) return v2;
+  }
+  return null;
+}
+
+/* ===================== BARCODE → ICCID ===================== */
+function findBarcode(base){
+  initReaders();
+  if(!_barReader) return null;
+  var cands=[base], bands=[[0,.40],[.25,.65],[.50,.85],[.60,1],[.30,1]], i;
+  for(i=0;i<bands.length;i++){
+    var b=crop(base,0,bands[i][0],1,bands[i][1]);
+    if(!b) continue;
+    cands.push(b, graySharp(b), binarize(b,'luma',false,true));
+  }
+  cands.push(rotate(base,90));
+  var loose=null;
+  for(i=0;i<cands.length;i++){
+    var t=zx(_barReader,cands[i]);
+    if(!t) continue;
+    var d=t.replace(/\D/g,'');
+    if(/^89\d{16,18}$/.test(d)){ if(luhn(d)) return d; if(!loose) loose=d; }
+  }
+  return loose;
+}
+
+/* ===================== TEXT EXTRACTION ===================== */
+var PIN_LABEL=/P\s*[I1l|!]\s*N/i;
+var PUK_LABEL=/P\s*[UVO0]\s*[KX]/i;
+function normDigits(s){
+  return String(s).replace(/[oO]/g,'0').replace(/[lI|]/g,'1').replace(/[sS]/g,'5')
+    .replace(/[bB]/g,'8').replace(/[gG]/g,'6').replace(/[zZ]/g,'2')
+    .replace(/[qQ]/g,'0').replace(/[aA]/g,'4').replace(/[tT]/g,'7');
+}
+function pickRun(str,count){
+  var norm=normDigits(str), i;
+  var loose=norm.match(/\d(?:[ \-]?\d)*/g)||[];
+  for(i=0;i<loose.length;i++){ var d=loose[i].replace(/\D/g,''); if(d.length===count) return d; }
+  var strict=norm.match(/\d+/g)||[];
+  for(i=0;i<strict.length;i++){ if(strict[i].length===count) return strict[i]; }
+  return null;
+}
+function extractLabeled(text,labelRe,count){
+  var lines=String(text).split(/\r?\n/);
+  for(var i=0;i<lines.length;i++){
+    var m=lines[i].match(labelRe);
+    if(!m) continue;
+    var d=pickRun(lines[i].slice(m.index+m[0].length),count);
+    if(d) return d;
+    d=pickRun(lines[i],count);
+    if(d) return d;
+    for(var off=1;off<=2&&i+off<lines.length;off++){ d=pickRun(lines[i+off],count); if(d) return d; }
+  }
+  return null;
+}
+function pinAbovePuk(text){
+  var lines=String(text).split(/\r?\n/);
+  for(var i=0;i<lines.length;i++){
+    if(!PUK_LABEL.test(lines[i])) continue;
+    for(var off=1;off<=2&&i-off>=0;off++){ var d=pickRun(lines[i-off],4); if(d) return d; }
+  }
+  return null;
+}
+function isActivationLine(l){
+  return /LPA\s*[:.]?\s*1/i.test(l)||/SM-?DP/i.test(l)||/ondemandconnectivity/i.test(l)||/\$[A-Z0-9]{4,}/.test(l);
+}
+function partOfIccid(run,iccid){
+  if(!iccid||iccid==='Not Found') return false;
+  return iccid===run||iccid.indexOf(run)!==-1;
+}
+function byLength(text,iccid){
+  var lines=String(text).split(/\r?\n/), pin=null, puk=null;
+  for(var i=0;i<lines.length;i++){
+    var line=lines[i].trim();
+    if(!line||isActivationLine(line)) continue;
+    var dc=(line.match(/\d/g)||[]).length, lc=(line.match(/[A-Za-z]/g)||[]).length;
+    if(lc>dc) continue;
+    if(!puk){ var c8=pickRun(line,8); if(c8&&!partOfIccid(c8,iccid)) puk=c8; }
+    if(!pin){ var c4=pickRun(line,4); if(c4&&!partOfIccid(c4,iccid)&&c4!==puk) pin=c4; }
+    if(pin&&puk) break;
+  }
+  return {pin:pin,puk:puk};
+}
+function applyPinPuk(text,res,iccid){
+  var d;
+  if(res.pin==='Not Found'){ d=extractLabeled(text,PIN_LABEL,4); if(d) res.pin=d; }
+  if(res.puk==='Not Found'){ d=extractLabeled(text,PUK_LABEL,8); if(d) res.puk=d; }
+  if(res.pin==='Not Found'&&res.puk!=='Not Found'){ d=pinAbovePuk(text); if(d) res.pin=d; }
+  if(res.pin==='Not Found'||res.puk==='Not Found'){
+    var pp=byLength(text,iccid);
+    if(res.pin==='Not Found'&&pp.pin) res.pin=pp.pin;
+    if(res.puk==='Not Found'&&pp.puk) res.puk=pp.puk;
+  }
+}
+function bestIccid(digits){
+  if(!digits) return null;
+  var idx=digits.indexOf('89'), lens=[19,20,18];
+  while(idx!==-1){
+    for(var i=0;i<lens.length;i++){
+      if(idx+lens[i]<=digits.length){
+        var cand=digits.substr(idx,lens[i]);
+        if(/^89\d+$/.test(cand)&&luhn(cand)) return cand;
+      }
+    }
+    idx=digits.indexOf('89',idx+1);
+  }
+  var m=digits.match(/89\d{16,18}/);
+  return m?m[0]:null;
+}
+function iccidFromText(text){
+  return bestIccid(normDigits(String(text).replace(/[\s\-]/g,'')).replace(/\D/g,''));
+}
+function luhn(num){
+  if(!/^\d+$/.test(num)) return false;
+  var sum=0, alt=false;
+  for(var i=num.length-1;i>=0;i--){
+    var n=parseInt(num[i],10);
+    if(alt){ n*=2; if(n>9) n-=9; }
+    sum+=n; alt=!alt;
+  }
+  return sum%10===0;
+}
+
+/* ===================== PIN/PUK BOX DETECTION ===================== */
+function brightBoxes(img,detectSize,cut){
+  var det=fit(img,detectSize), dw=det.width, dh=det.height;
+  var dd=det.getContext('2d').getImageData(0,0,dw,dh).data;
+  var bright=new Uint8Array(dw*dh), i, p;
+  for(i=0,p=0;i<dd.length;i+=4,p++){
+    bright[p]=(dd[i]*0.299+dd[i+1]*0.587+dd[i+2]*0.114)>cut?1:0;
+  }
+  var visited=new Uint8Array(dw*dh), queue=new Int32Array(dw*dh), out=[];
+  for(var y=0;y<dh;y++) for(var x=0;x<dw;x++){
+    var idx=y*dw+x;
+    if(!bright[idx]||visited[idx]) continue;
+    var qs=0,qe=0; queue[qe++]=idx; visited[idx]=1;
+    var minX=x,maxX=x,minY=y,maxY=y,area=0;
+    while(qs<qe){
+      var cur=queue[qs++], cy=(cur/dw)|0, cx=cur%dw;
+      area++;
+      if(cx<minX)minX=cx; if(cx>maxX)maxX=cx; if(cy<minY)minY=cy; if(cy>maxY)maxY=cy;
+      if(cx>0&&bright[cur-1]&&!visited[cur-1]){visited[cur-1]=1;queue[qe++]=cur-1;}
+      if(cx<dw-1&&bright[cur+1]&&!visited[cur+1]){visited[cur+1]=1;queue[qe++]=cur+1;}
+      if(cy>0&&bright[cur-dw]&&!visited[cur-dw]){visited[cur-dw]=1;queue[qe++]=cur-dw;}
+      if(cy<dh-1&&bright[cur+dw]&&!visited[cur+dw]){visited[cur+dw]=1;queue[qe++]=cur+dw;}
+    }
+    out.push({minX:minX,minY:minY,maxX:maxX,maxY:maxY,area:area,dw:dw,dh:dh});
+  }
+  return out;
+}
+function boxCrop(img,b,insetX,insetY){
+  var sxs=img.width/b.dw, sys=img.height/b.dh;
+  var ow=(b.maxX-b.minX)*sxs, oh=(b.maxY-b.minY)*sys;
+  var ix=ow*insetX, iy=oh*insetY;
+  var sx=Math.max(0,b.minX*sxs+ix), sy=Math.max(0,b.minY*sys+iy);
+  var ex=Math.min(img.width,(b.maxX+1)*sxs-ix), ey=Math.min(img.height,(b.maxY+1)*sys-iy);
+  if(ex-sx<12||ey-sy<12) return null;
+  var c=document.createElement('canvas');
+  c.width=Math.round(ex-sx); c.height=Math.round(ey-sy);
+  c.getContext('2d').drawImage(img,sx,sy,ex-sx,ey-sy,0,0,c.width,c.height);
+  return c;
+}
+/* The thin white frame around "PIN: / PUK:" — a hollow rectangle, so a LOW fill
+   ratio is what identifies it. Cropping inside the stroke stops the border
+   corrupting the PIN line, which sits directly under it. */
+function outlineBox(img){
+  var boxes=brightBoxes(img,500,190), best=null;
+  for(var i=0;i<boxes.length;i++){
+    var b=boxes[i], w=b.maxX-b.minX+1, h=b.maxY-b.minY+1;
+    var fill=b.area/(w*h), areaFrac=(w*h)/(b.dw*b.dh), aspect=w/h;
+    if(areaFrac>0.015&&areaFrac<0.5&&fill>0.012&&fill<0.40&&aspect>1.4&&aspect<9&&w>b.dw*0.12){
+      if(!best||w*h>(best.maxX-best.minX+1)*(best.maxY-best.minY+1)) best=b;
+    }
+  }
+  return best?boxCrop(img,best,0.05,0.09):null;
+}
+
+/* ===================== ONE PHOTO ===================== */
+function loadFile(file){
+  return new Promise(function(resolve,reject){
+    var fr=new FileReader();          // data URL — never taints the canvas, so this
+    fr.onload=function(ev){           // page works even opened straight from disk
+      var img=new Image();
+      img.onload=function(){ resolve(img); };
+      img.onerror=function(){ reject(new Error('cannot decode '+file.name+' (HEIC files need converting to JPEG)')); };
+      img.src=ev.target.result;
+    };
+    fr.onerror=function(){ reject(new Error('cannot read '+file.name)); };
+    fr.readAsDataURL(file);
+  });
+}
+function scan(img,label){
+  var src=toCanvas(img), base=fit(src,WORK_SIZE), raw='';
+
+  setStatus('Reading the QR code…');
+  var lpa=findQR(base);
+  if(lpa) raw+='----- QR -----\n'+lpa+'\n';
+
+  setStatus('Reading the ICCID barcode…');
+  var iccid='Not Found', fromBc=false, iccidLuhn=null;
+  var bc=findBarcode(base);
+  if(bc){ iccid=bc; fromBc=true; iccidLuhn=luhn(bc); raw+='----- barcode ICCID -----\n'+bc+'\n'; }
+
+  var res={pin:'Not Found',puk:'Not Found'};
+  var crops=[];
+  var ob=outlineBox(src); if(ob) crops.push({n:'outline box',c:ob});
+  var ul=crop(src,.02,.20,.60,.60); if(ul) crops.push({n:'upper left',c:ul});
+  crops.push({n:'whole card',c:fit(src,1700)});
+
+  var passes=0, chain=Promise.resolve();
+  crops.forEach(function(cr){
+    [['blue inverted','blue',true],['luma inverted','luma',true],['luma normal','luma',false]].forEach(function(v){
+      chain=chain.then(function(){
+        if(res.pin!=='Not Found'&&res.puk!=='Not Found') return;
+        if(passes>=MAX_OCR_PASSES) return;
+        passes++;
+        var prepped=binarize(up(cr.c,1100),v[1],v[2],true);
+        return ocr(prepped,'Reading PIN and PUK ('+cr.n+')').then(function(text){
+          raw+='\n----- '+cr.n+' / '+v[0]+' -----\n'+text;
+          applyPinPuk(text,res,fromBc?iccid:null);
+          if(!fromBc&&iccid==='Not Found'){ var c=iccidFromText(text); if(c){ iccid=c; iccidLuhn=luhn(c); } }
+        });
+      });
+    });
+  });
+
+  // digits-only rescue: with letters forbidden the labels vanish and the numbers
+  // read cleanly, so they are matched on length (4 = PIN, 8 = PUK)
+  chain=chain.then(function(){
+    if(res.pin!=='Not Found'&&res.puk!=='Not Found') return;
+    var target=crops[0].c;
+    setStatus('Reading PIN and PUK — digits only');
+    return ocrDigits(binarize(up(target,1100),'blue',true,true)).then(function(text){
+      if(!text) return;
+      raw+='\n----- digits only -----\n'+text;
+      var pp=byLength(text,fromBc?iccid:null);
+      if(res.pin==='Not Found'&&pp.pin) res.pin=pp.pin;
+      if(res.puk==='Not Found'&&pp.puk) res.puk=pp.puk;
+    });
+  });
+
+  return chain.then(function(){
+    return {
+      id:nextId++, time:new Date().toLocaleTimeString(), source:label||'Photo',
+      iccid:iccid, iccidLuhn:iccidLuhn, fromBc:fromBc,
+      pin:res.pin, puk:res.puk, lpa:lpa||'QR Not Found',
+      img:thumbOf(src), saved:false, duplicate:false, raw:raw, showRaw:false
+    };
+  });
+}
+
+/* ===================== BATCH ===================== */
+fileInput.addEventListener('change',function(e){ handle(Array.prototype.slice.call(e.target.files||[])); e.target.value=''; });
+cameraInput.addEventListener('change',function(e){ handle(Array.prototype.slice.call(e.target.files||[])); e.target.value=''; });
+
+function handle(files){
+  if(!files.length) return;
+  if(running){ setStatus('Still working through the last batch.',true); return; }
+  if(typeof Tesseract==='undefined'||typeof jsQR==='undefined'){ setStatus('The libraries did not load, so nothing can be read. Reload the page.',true); return; }
+  running=true;
+  thumbsEl.innerHTML='';
+  var thumbs=files.map(function(f){
+    var im=document.createElement('img');
+    im.src=URL.createObjectURL(f); im.title=f.name;
+    thumbsEl.appendChild(im);
+    return im;
+  });
+  var i=0, good=0, check=0;
+  function next(){
+    if(i>=files.length){
+      setBar(files.length,files.length);
+      setStatus('Finished — '+good+' complete, '+check+' needing a look. Tap any field to correct it.');
+      setTimeout(function(){ setBar(0,0); },1200);
+      running=false;
+      return;
+    }
+    thumbs[i].className='active';
+    setBar(i,files.length);
+    setStatus('Photo '+(i+1)+' of '+files.length+' — '+files[i].name);
+    loadFile(files[i]).then(function(img){
+      return scan(img,files[i].name);
+    }).then(function(row){
+      row.duplicate=rows.some(function(r){ return r.iccid!=='Not Found'&&r.iccid===row.iccid; });
+      rows.unshift(row);
+      render();
+      if(row.iccid==='Not Found'||row.pin==='Not Found'||row.puk==='Not Found'||row.lpa==='QR Not Found') check++; else good++;
+    }).catch(function(err){
+      check++;
+      setStatus('Skipped '+files[i].name+': '+(err&&err.message?err.message:err),true);
+    }).then(function(){
+      thumbs[i].className='done';
+      i++;
+      setTimeout(next,30);
+    });
+  }
+  next();
+}
+
+/* ===================== TABLE ===================== */
+function esc(s){ return String(s).replace(/[&<>"]/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+function badge(l){
+  if(l===true) return '<span style="color:#15803d;margin-left:4px;" title="Luhn checksum passes">&#10003;</span>';
+  if(l===false) return '<span style="color:#c5221f;margin-left:4px;" title="Luhn checksum fails">&#9888;</span>';
+  return '';
+}
+function render(){
+  hintEl.style.display=rows.length?'block':'none';
+  if(!rows.length){ tbody.innerHTML='<tr><td colspan="6" class="empty">No cards yet. Choose photos to begin.</td></tr>'; return; }
+  tbody.innerHTML=rows.map(function(r){
+    var tags=(r.saved?'<span class="tag tag-saved">saved</span>':'')+(r.duplicate?'<span class="tag tag-dup" title="Another row has this ICCID">DUPLICATE</span>':'');
+    var main='<tr data-id="'+r.id+'">'+
+      '<td>'+(r.img?'<img class="rowthumb" src="'+r.img+'" alt="card">':'')+
+        '<div style="font-size:12px;color:#64748b;max-width:120px;word-break:break-all;">'+esc(r.source)+'</div>'+
+        '<div style="font-size:12px;color:#94a3b8;">'+esc(r.time)+'</div>'+tags+'</td>'+
+      '<td><span class="edit'+(r.iccidLuhn===false?' bad':'')+'" contenteditable="true" data-f="iccid">'+esc(r.iccid)+'</span>'+badge(r.iccidLuhn)+
+        (r.fromBc?'<span class="tag tag-bc" title="Decoded from the barcode">BARCODE</span>':'')+'</td>'+
+      '<td><span class="edit" contenteditable="true" data-f="pin">'+esc(r.pin)+'</span></td>'+
+      '<td><span class="edit" contenteditable="true" data-f="puk">'+esc(r.puk)+'</span></td>'+
+      '<td class="lpa-text"><span class="edit" contenteditable="true" data-f="lpa">'+esc(r.lpa)+'</span></td>'+
+      '<td><button class="icon-btn" data-raw="'+r.id+'" title="Raw OCR text">&#128269;</button>'+
+          '<button class="icon-btn del" data-del="'+r.id+'" title="Delete row">&#128465;</button></td></tr>';
+    return main+(r.showRaw?'<tr class="raw-row"><td colspan="6"><pre class="raw-text">'+esc(r.raw||'(nothing captured)')+'</pre></td></tr>':'');
+  }).join('');
+}
+tbody.addEventListener('focusout',function(e){
+  var span=e.target.closest?e.target.closest('.edit'):null;
+  if(!span) return;
+  var tr=span.closest('tr');
+  var r=rows.filter(function(x){ return x.id===+tr.getAttribute('data-id'); })[0];
+  if(!r) return;
+  r[span.getAttribute('data-f')]=span.textContent.trim();
+  if(span.getAttribute('data-f')==='iccid'){
+    r.fromBc=false;
+    r.iccidLuhn=/^\d+$/.test(r.iccid)?luhn(r.iccid):null;
+    render();
+  }
+});
+tbody.addEventListener('keydown',function(e){
+  if(e.key==='Enter'&&e.target.closest&&e.target.closest('.edit')){ e.preventDefault(); e.target.blur(); }
+});
+tbody.addEventListener('click',function(e){
+  var t=e.target.closest('.rowthumb');
+  if(t&&t.src){ var w=window.open(); if(w) w.document.write('<img src="'+t.src+'" style="max-width:100%">'); return; }
+  var del=e.target.closest('[data-del]');
+  if(del){ var id=+del.getAttribute('data-del'); rows=rows.filter(function(x){ return x.id!==id; }); render(); return; }
+  var raw=e.target.closest('[data-raw]');
+  if(raw){
+    var rid=+raw.getAttribute('data-raw');
+    rows.forEach(function(x){ if(x.id===rid) x.showRaw=!x.showRaw; });
+    render();
+  }
+});
+
+/* ===================== SHEET / CSV ===================== */
+$('saveBtn').addEventListener('click',function(){
+  var unsaved=rows.filter(function(r){ return !r.saved; });
+  if(!unsaved.length){ setStatus('Every row is already saved.'); return; }
+  var payload={secret:SHEET_SECRET,records:unsaved.map(function(r){
+    return {time:r.time,source:r.source,
+      iccid:r.iccid==='Not Found'?'':r.iccid,
+      iccidValid:r.iccidLuhn===true?'OK':(r.iccidLuhn===false?'CHECK':''),
+      iccidSource:r.fromBc?'BARCODE':'OCR',
+      pin:r.pin==='Not Found'?'':r.pin,
+      puk:r.puk==='Not Found'?'':r.puk,
+      lpa:r.lpa==='QR Not Found'?'':r.lpa};
+  })};
+  setStatus('Saving to the sheet…');
+  fetch(SHEET_ENDPOINT,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)})
+    .then(function(){ unsaved.forEach(function(r){ r.saved=true; }); render(); setStatus('Sent '+unsaved.length+' row(s) — open the sheet to confirm.'); })
+    .catch(function(err){ setStatus('The save failed: '+err.message,true); });
+});
+$('csvBtn').addEventListener('click',function(){
+  if(!rows.length){ setStatus('There is nothing to export yet.',true); return; }
+  var csv='Time,Source,ICCID,ICCID_Valid,ICCID_Source,PIN,PUK,LPA Code\n';
+  rows.forEach(function(r){
+    var v=r.iccidLuhn===true?'OK':(r.iccidLuhn===false?'CHECK':'');
+    var f=[r.time,r.source,"'"+r.iccid,v,r.fromBc?'BARCODE':'OCR',r.pin,r.puk,r.lpa];
+    csv+=f.map(function(x){ return '"'+String(x).replace(/"/g,'""')+'"'; }).join(',')+'\n';
+  });
+  var url=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  var a=document.createElement('a'); a.href=url; a.download='eSIM_Batch.csv'; a.click();
+  URL.revokeObjectURL(url);
+});
+$('clearBtn').addEventListener('click',function(){
+  if(!rows.length) return;
+  if(!confirm('Remove all '+rows.length+' rows?')) return;
+  rows=[]; thumbsEl.innerHTML=''; render(); setStatus('Rows cleared.');
+});
+</script>
 </body>
 </html>

@@ -182,8 +182,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
         scaleMultiplier = scaleMultiplier || 1;
 
-        let targetWidth = Math.floor(w * scaleMultiplier);
-        let targetHeight = Math.floor(h * scaleMultiplier);
+        let targetWidth =
+            Math.floor(w * scaleMultiplier);
+
+        let targetHeight =
+            Math.floor(h * scaleMultiplier);
 
         const maxSize = 4500;
 
@@ -206,7 +209,8 @@ document.addEventListener("DOMContentLoaded", function () {
                 Math.floor(targetHeight * limit)
             );
 
-        const canvas = document.createElement("canvas");
+        const canvas =
+            document.createElement("canvas");
 
         canvas.width = targetWidth;
         canvas.height = targetHeight;
@@ -338,7 +342,9 @@ document.addEventListener("DOMContentLoaded", function () {
     function scanQRCanvas(canvas) {
 
         if (typeof window.jsQR !== "function") {
+
             console.log("jsQR unavailable");
+
             return "";
         }
 
@@ -402,7 +408,6 @@ document.addEventListener("DOMContentLoaded", function () {
 
         const areas = [
 
-            /* Full image */
             {
                 x: 0,
                 y: 0,
@@ -410,7 +415,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 1
             },
 
-            /* Top */
             {
                 x: 0,
                 y: 0,
@@ -418,7 +422,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 0.55
             },
 
-            /* Bottom */
             {
                 x: 0,
                 y: 0.45,
@@ -426,7 +429,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 0.55
             },
 
-            /* Left */
             {
                 x: 0,
                 y: 0,
@@ -434,7 +436,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 1
             },
 
-            /* Right */
             {
                 x: 0.45,
                 y: 0,
@@ -442,7 +443,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 1
             },
 
-            /* Top-left */
             {
                 x: 0,
                 y: 0,
@@ -450,7 +450,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 0.7
             },
 
-            /* Top-right */
             {
                 x: 0.3,
                 y: 0,
@@ -458,7 +457,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 0.7
             },
 
-            /* Bottom-left */
             {
                 x: 0,
                 y: 0.3,
@@ -466,7 +464,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 0.7
             },
 
-            /* Bottom-right */
             {
                 x: 0.3,
                 y: 0.3,
@@ -474,7 +471,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 0.7
             },
 
-            /* Center */
             {
                 x: 0.15,
                 y: 0.15,
@@ -503,7 +499,6 @@ document.addEventListener("DOMContentLoaded", function () {
                     return result;
                 }
 
-                /* Try enhanced QR image */
                 const gray =
                     enhanceCanvas(
                         canvas,
@@ -593,15 +588,19 @@ document.addEventListener("DOMContentLoaded", function () {
                         );
 
                     const canvases = [
+
                         canvas,
+
                         enhanceCanvas(
                             canvas,
                             "gray"
                         ),
+
                         enhanceCanvas(
                             canvas,
                             "contrast"
                         ),
+
                         enhanceCanvas(
                             canvas,
                             "threshold"
@@ -638,19 +637,12 @@ document.addEventListener("DOMContentLoaded", function () {
                                     digits.length <= 22
                                 ) {
 
-                                    if (
-                                        digits.startsWith("89")
-                                    ) {
-                                        return digits;
-                                    }
-
                                     return digits;
                                 }
                             }
 
                         } catch (error) {
-
-                            /* Continue */
+                            // Continue scanning
                         }
                     }
                 }
@@ -897,11 +889,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 .replace(/[Oo]/g, "0")
                 .replace(/[Il|]/g, "1");
 
-        /*
-         * First look for ICCID beginning with 89.
-         * Allows spaces/hyphens between digits.
-         */
-
         const pattern =
             /89(?:[\s\-]*\d){16,20}/g;
 
@@ -927,10 +914,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 }
             }
         }
-
-        /*
-         * Look line-by-line for long numbers.
-         */
 
         const lines =
             normalized.split("\n");
@@ -970,10 +953,6 @@ document.addEventListener("DOMContentLoaded", function () {
             normalizeText(text)
                 .replace(/\s+/g, "");
 
-        /*
-         * Standard LPA format
-         */
-
         const lpaMatch =
             clean.match(
                 /LPA:[A-Za-z0-9+./:_=-]+/i
@@ -984,10 +963,6 @@ document.addEventListener("DOMContentLoaded", function () {
             return lpaMatch[0];
         }
 
-        /*
-         * Sometimes OCR reads LPA incorrectly.
-         */
-
         const lpaBroken =
             clean.match(
                 /LP[A4]:[A-Za-z0-9+./:_=-]+/i
@@ -996,12 +971,11 @@ document.addEventListener("DOMContentLoaded", function () {
         if (lpaBroken) {
 
             return lpaBroken[0]
-                .replace(/^LP[A4]/i, "LPA");
+                .replace(
+                    /^LP[A4]/i,
+                    "LPA"
+                );
         }
-
-        /*
-         * Common activation-code format.
-         */
 
         const activation =
             clean.match(
@@ -1026,7 +1000,6 @@ document.addEventListener("DOMContentLoaded", function () {
 
         const areas = [
 
-            /* Full image */
             {
                 x: 0,
                 y: 0,
@@ -1034,7 +1007,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 1
             },
 
-            /* Top */
             {
                 x: 0,
                 y: 0,
@@ -1042,7 +1014,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 0.6
             },
 
-            /* Bottom */
             {
                 x: 0,
                 y: 0.4,
@@ -1050,7 +1021,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 0.6
             },
 
-            /* Left */
             {
                 x: 0,
                 y: 0,
@@ -1058,7 +1028,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 1
             },
 
-            /* Right */
             {
                 x: 0.4,
                 y: 0,
@@ -1066,7 +1035,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 height: 1
             },
 
-            /* Center */
             {
                 x: 0.15,
                 y: 0.15,
@@ -1138,11 +1106,6 @@ document.addEventListener("DOMContentLoaded", function () {
 
                 const iccid =
                     findICCID(allText);
-
-                /*
-                 * Stop early when all important
-                 * OCR fields are found.
-                 */
 
                 if (
                     pin &&
@@ -1217,22 +1180,6 @@ document.addEventListener("DOMContentLoaded", function () {
 
             finalLPA =
                 findLPA(ocrText);
-        }
-
-        /*
-         * If QR contains an LPA string,
-         * use it directly.
-         */
-
-        if (
-            finalLPA &&
-            !finalLPA.toUpperCase().startsWith("LPA:")
-        ) {
-
-            /*
-             * Keep actual QR value.
-             * QR codes can contain full activation data.
-             */
         }
 
         let found = 0;
